@@ -89,6 +89,7 @@ This server uses OAuth 2.0/2.1 credentials. On first use:
 | `WORKSPACE_MCP_PORT` | HTTP server port | `9876` |
 | `WORKSPACE_MCP_CONFIG_DIR` | Directory for credentials | `~/.config/gws-mcp-advanced` |
 | `AUTH_DIAGNOSTICS` | Enable auth debug logging | `false` |
+| `WORKSPACE_MCP_ALLOW_UNVERIFIED_JWT` | Break-glass: allow identity extraction from unverified JWT claims (not recommended) | `false` |
 
 
 ## Available Tools
