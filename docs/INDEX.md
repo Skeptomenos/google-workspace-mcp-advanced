@@ -1,14 +1,21 @@
 # User Documentation Index
 
-Audience: Users and operators consuming the MCP.
+Audience: users and operators running this MCP in clients such as OpenCode, Claude Code, and Gemini CLI.
 
-Prerequisite: install `uv` first (`uvx` is the recommended runtime path).
+## Start Here
 
-## Setup
-- [MCP Client Setup Guide](/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/docs/setup/MCP_CLIENT_SETUP_GUIDE.md)
+1. Install `uv`.
+2. Configure your MCP client.
+3. Authenticate your Google account.
+4. Use a pinned `uvx` version for stable team rollouts.
 
-## Distribution
-- [Distribution and Release Guide](/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/docs/DISTRIBUTION_RELEASE.md)
+## Guides
 
-## Product Overview
-- [Comparison](/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/docs/COMPARISON.md)
+- Setup and client configuration: [MCP Client Setup Guide](setup/MCP_CLIENT_SETUP_GUIDE.md)
+- Release/versioning/rollback: [Distribution and Release Guide](DISTRIBUTION_RELEASE.md)
+- Product overview and upstream comparison: [Comparison](COMPARISON.md)
+
+## Notes
+
+- Recommended runtime path is `uvx`.
+- Contributor planning and test execution docs live under `agent-docs/`.

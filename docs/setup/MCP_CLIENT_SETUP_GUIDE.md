@@ -1,11 +1,12 @@
 # MCP Client Setup Guide
 
-Audience: Users.
+Audience: users and team operators.
 
-This guide explains how to connect `google-workspace-mcp-advanced` from common MCP clients.
+This guide shows the recommended client setup for `google-workspace-mcp-advanced`.
 
-## Prerequisite: Install uv
-`uvx` is the recommended runtime path, so install `uv` first.
+## 1. Prerequisite: Install `uv`
+
+`uvx` is the recommended runtime path.
 
 ```bash
 # macOS (Homebrew)
@@ -18,8 +19,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv --version
 ```
 
-## Stable Team Setup (Recommended)
-Use pinned `uvx` versions for production teams.
+## 2. Stable Team Setup (Recommended)
+
+Use a pinned version for reproducible team behavior.
 
 ```json
 {
@@ -35,8 +37,9 @@ Use pinned `uvx` versions for production teams.
 }
 ```
 
-## Local Development Setup
-Use repository-local execution while developing or testing unreleased changes.
+## 3. Local Development Setup
+
+Use this when testing local repository changes.
 
 ```json
 {
@@ -59,22 +62,40 @@ Use repository-local execution while developing or testing unreleased changes.
 }
 ```
 
-## OpenCode
-1. Configure an MCP server entry using one of the snippets above.
+## 4. First-Run Authentication
+
+1. Start the MCP server from your client.
+2. Open the OAuth URL shown in the client/server output.
+3. Sign in and grant scopes.
+4. Confirm tools are available (for example, ask the client to list tools from `google-workspace`).
+
+## Client Notes
+
+### OpenCode
+
+1. Add one of the server entries above.
 2. Restart OpenCode after config or code changes.
-3. Ask OpenCode to list tools for `google-workspace` to confirm registration.
+3. Run a quick smoke prompt: "List available tools from google-workspace."
 
-## Gemini CLI
-Gemini CLI can use MCP servers through your CLI/client MCP config. Use the same server entries above.
+### Gemini CLI
 
-## Claude Code / Other TUIs (Cursor, Cline, Windsurf)
-Use the same `mcpServers` structure if the client supports standard MCP config JSON. For client-specific config file locations, use the client docs and paste the same server block.
+Use the same `mcpServers` block in your Gemini CLI MCP configuration.
 
-## Required Environment Variables
-- `USER_GOOGLE_EMAIL` (required)
-- `WORKSPACE_MCP_CONFIG_DIR` (optional)
-- `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` (required for OAuth flow)
+### Claude Code and Other TUIs
 
-## Notes
-- Prefer pinned `uvx` versions (`==x.y.z`) for team stability.
-- Keep a separate local-dev MCP entry to avoid mixing unreleased code into production workflows.
+Use the same `mcpServers` JSON shape in the client-specific config file.
+
+## Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `USER_GOOGLE_EMAIL` | Yes | Google account used by this server instance |
+| `GOOGLE_OAUTH_CLIENT_ID` | Yes | OAuth client ID |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | Yes | OAuth client secret |
+| `WORKSPACE_MCP_CONFIG_DIR` | No | Override credential/config directory |
+
+## Best Practices
+
+- Pin stable team configs (`==x.y.z`), not floating latest.
+- Keep separate entries for stable and local-dev servers.
+- Restart your MCP client after changing MCP config.

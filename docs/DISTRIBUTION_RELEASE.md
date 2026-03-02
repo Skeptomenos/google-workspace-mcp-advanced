@@ -1,16 +1,26 @@
 # Distribution and Release Guide
 
 ## Metadata
-- Last Updated (UTC): 2026-03-02T13:53:12Z
-- Primary Distribution: `uvx` from PyPI
+
+- Last Updated (UTC): 2026-03-02T15:04:43Z
+- Primary Runtime: `uvx`
 - Python Package: `google-workspace-mcp-advanced`
 
-## Primary Channels (uvx-first)
-1. Stable: latest PyPI release
-2. Pinned: explicit version (`==x.y.z`)
+## Distribution Model
 
-## Prerequisite: Install uv
-`uvx` is provided by `uv`, so users must install `uv` first.
+This project ships through PyPI and runs through `uvx`.
+
+```bash
+# Stable (latest published)
+uvx google-workspace-mcp-advanced --transport stdio
+
+# Pinned (recommended for teams)
+uvx google-workspace-mcp-advanced==1.0.0 --transport stdio
+```
+
+## Prerequisite
+
+Install `uv` before using `uvx`.
 
 ```bash
 # macOS (Homebrew)
@@ -23,36 +33,34 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv --version
 ```
 
-## Consumer Install Paths (Recommended)
-```bash
-# Stable
-uvx google-workspace-mcp-advanced --transport stdio
+## Release Sequence
 
-# Deterministic pinned
-uvx google-workspace-mcp-advanced==1.0.0 --transport stdio
-```
+1. Publish package to PyPI.
+2. Validate both channels:
+   1. stable (`uvx google-workspace-mcp-advanced ...`)
+   2. pinned (`uvx google-workspace-mcp-advanced==x.y.z ...`)
 
-## Release Order
-1. Publish Python package to PyPI.
-2. Validate stable (`uvx package`) and pinned (`uvx package==x.y.z`) paths.
+## Workflow
 
-## GitHub Workflows
-1. `.github/workflows/release-pypi.yml`
+- Release workflow: `.github/workflows/release-pypi.yml`
+- Trusted publishing target: PyPI (OIDC)
 
-## Trusted Publishing Requirements
-1. Configure PyPI trusted publisher for this repository/project.
-2. Keep workflow permissions:
-   - `id-token: write`
-   - `contents: read`
+## Rollback
 
-## Rollback Playbook (uvx-first)
-If a release is bad, pin consumers to the last known-good version:
+If a release is bad, pin clients to a known-good version:
 
 ```bash
 uvx google-workspace-mcp-advanced==<good_version> --transport stdio
 ```
 
-## Pre-Release Validation Checklist (Primary Lane)
+## Pre-Release Checks
+
 1. `uv run python scripts/check_distribution_scope.py`
 2. `uv run pytest -q tests/unit/core/test_distribution_checks.py`
 3. `uvx google-workspace-mcp-advanced==1.0.0 --help`
+
+## Team Rollout Guidance
+
+- Use pinned versions in production-facing MCP configs.
+- Roll forward by updating the pinned version.
+- Roll back by reverting to the prior known-good pinned version.

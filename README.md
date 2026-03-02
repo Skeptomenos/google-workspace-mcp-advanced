@@ -1,27 +1,20 @@
 # Google Workspace MCP Advanced
 
-Advanced Model Context Protocol (MCP) server for Google Workspace integration.
+Production-ready MCP server for Google Workspace.
 
-This project is an advanced fork of [taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp), merged with advanced file synchronization features from the `drive-synapsis` MCP. It provides AI assistants with comprehensive access to Gmail, Google Drive, Calendar, Docs, Sheets, Chat, Forms, Slides, Tasks, and Search with bidirectional sync capabilities.
+`google-workspace-mcp-advanced` gives MCP clients broad Google Workspace coverage with safe-by-default write operations, Markdown-to-Google-Docs support, and Drive sync workflows.
 
-## Features
+## Why This Project
 
-- **10 Google Services**: Gmail, Drive, Calendar, Docs, Sheets, Chat, Forms, Slides, Tasks, Search
-- **100+ Tools**: Comprehensive API coverage for each service
-- **Advanced Sync Tools**: Bidirectional file synchronization between local files and Google Drive (based on `drive-synapsis`)
-- **Search Aliases**: Quick reference to search results using A-Z aliases
-- **OAuth 2.0/2.1**: Secure authentication with persistent session management
-- **Session Persistence**: Credentials survive server restarts - no re-authentication required
-- **Async Architecture**: Non-blocking operations for high performance
+- 10 service domains: Gmail, Drive, Calendar, Docs, Sheets, Chat, Forms, Slides, Tasks, Search
+- 100+ tools for read and write operations
+- Dry-run defaults for mutating operations
+- Strong Markdown rendering for Google Docs (kitchen-sink validated)
+- Persistent OAuth sessions and resilient auth storage
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.11+
-- uv (required for `uvx` distribution path)
-
-Install `uv`:
+### 1. Install `uv`
 
 ```bash
 # macOS (Homebrew)
@@ -34,52 +27,17 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv --version
 ```
 
-### Installation
+### 2. Run the MCP server from PyPI (recommended)
 
 ```bash
-# Clone the repository
-cd google-workspace-mcp-advanced
-
-# Install with uv
-uv pip install -e .
-
-# Or with pip
-pip install -e .
-```
-
-### Distribution Channels (`uv`/`uvx`, Recommended)
-
-```bash
-# Stable channel (latest PyPI release)
+# Stable channel (latest release)
 uvx google-workspace-mcp-advanced --transport stdio
 
-# Pinned deterministic version (recommended for production rollouts)
+# Pinned deterministic version (recommended for teams)
 uvx google-workspace-mcp-advanced==1.0.0 --transport stdio
 ```
 
-Notes:
-- `uvx` is the primary distribution path and directly installs/runs from PyPI.
-- Release sequencing and rollback guidance: `docs/DISTRIBUTION_RELEASE.md`.
-
-### Running the Server
-
-```bash
-# STDIO mode (default, for MCP clients)
-uv run google-workspace-mcp-advanced --transport stdio
-
-# HTTP mode (for web-based clients)
-uv run google-workspace-mcp-advanced --transport streamable-http
-
-# Single-user mode (bypasses session mapping)
-uv run google-workspace-mcp-advanced --single-user
-
-# Load specific services only
-uv run google-workspace-mcp-advanced --tools gmail drive calendar
-```
-
-### MCP Client Configuration
-
-Add to your MCP client configuration (e.g., Claude Desktop, OpenCode):
+### 3. Add MCP client config
 
 ```json
 {
@@ -88,9 +46,27 @@ Add to your MCP client configuration (e.g., Claude Desktop, OpenCode):
       "command": "uvx",
       "args": ["google-workspace-mcp-advanced==1.0.0", "--transport", "stdio"],
       "env": {
-        "USER_GOOGLE_EMAIL": "your.email@gmail.com"
+        "USER_GOOGLE_EMAIL": "your.email@company.com"
       }
-    },
+    }
+  }
+}
+```
+
+### 4. Authenticate on first run
+
+1. Start the server from your MCP client.
+2. Open the OAuth URL shown by the server.
+3. Sign in and grant the requested scopes.
+4. Credentials are saved in `~/.config/gws-mcp-advanced/credentials/`.
+
+## Local Development Mode
+
+Use repository-local execution when building or testing unreleased changes.
+
+```json
+{
+  "mcpServers": {
     "google-workspace-dev": {
       "command": "uv",
       "args": [
@@ -102,225 +78,64 @@ Add to your MCP client configuration (e.g., Claude Desktop, OpenCode):
         "stdio"
       ],
       "env": {
-        "USER_GOOGLE_EMAIL": "your.email@gmail.com"
+        "USER_GOOGLE_EMAIL": "your.email@company.com"
       }
     }
   }
 }
 ```
 
-Use the `uvx` server entry for stable releases and keep the `uv run --project` entry for local development.
+## Service Coverage
 
-User docs entry point: `docs/INDEX.md`.
-Contributor docs entry points: `AGENTS.md` and `agent-docs/INDEX.md`.
+| Service | Example Capabilities |
+|---|---|
+| Gmail | search, read, draft, send, labels, filters |
+| Drive | search, read, upload, permissions, ownership transfer |
+| Calendar | list/create/modify/delete events |
+| Docs | create/update docs, markdown insertion, table and image handling |
+| Sheets | read/write ranges, formatting, conditional formatting |
+| Chat | list spaces, read/send messages |
+| Forms | create forms, read responses, update publish settings |
+| Slides | create presentations, batch updates |
+| Tasks | task lists and task lifecycle management |
+| Search | programmable search endpoint support |
 
-## Authentication
+## Safety Model
 
-This server uses OAuth 2.0/2.1 credentials. On first use:
+- Mutating tools default to `dry_run=True`.
+- You must pass `dry_run=False` to execute real changes.
+- This reduces accidental writes during assistant experimentation.
 
-1. The server will provide an OAuth URL
-2. Open the URL in your browser
-3. Sign in with your Google account
-4. Grant the requested permissions
-5. Credentials are stored in `~/.config/gws-mcp-advanced/credentials/`
-
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `USER_GOOGLE_EMAIL` | Your Google email | Required |
-| `GOOGLE_OAUTH_CLIENT_ID` | OAuth client ID | Required |
-| `GOOGLE_OAUTH_CLIENT_SECRET` | OAuth client secret | Required |
-| `MCP_SINGLE_USER_MODE` | Bypass session mapping | `false` |
-| `WORKSPACE_MCP_PORT` | HTTP server port | `9876` |
-| `WORKSPACE_MCP_CONFIG_DIR` | Directory for credentials | `~/.config/gws-mcp-advanced` |
-| `AUTH_DIAGNOSTICS` | Enable auth debug logging | `false` |
-| `WORKSPACE_MCP_ALLOW_UNVERIFIED_JWT` | Break-glass: allow identity extraction from unverified JWT claims (not recommended) | `false` |
-
-
-## Available Tools
-
-### Gmail
-- `search_gmail_messages` - Search emails
-- `get_gmail_message_content` - Read email content
-- `send_gmail_message` - Send emails
-- `draft_gmail_message` - Create drafts
-- And more...
-
-### Google Drive
-- `search_google_drive` - Search files (results cached with A-Z aliases)
-- `read_google_drive_file` - Read file content
-- `create_google_doc` - Create documents
-- `upload_file` - Upload files
-- **Sync Tools**:
-  - `link_local_file` - Link local file to Drive
-  - `update_google_doc` - Upload local to Drive (dry-run default)
-  - `download_google_doc` - Download Drive to local (dry-run default)
-  - `upload_folder` - Recursive folder upload
-  - `mirror_drive_folder` - Recursive folder download
-  - `download_doc_tabs` - Multi-tab document sync
-
-### Google Calendar
-- `get_events` - List calendar events
-- `create_event` - Create events
-- `modify_event` - Update events
-- `delete_event` - Delete events
-
-### Google Docs
-- `get_document_outline` - Get document structure
-- `read_document_section` - Read specific sections
-- `append_to_google_doc` - Append content
-- `replace_doc_text` - Find and replace
-
-### Google Sheets
-- `read_sheet_range` - Read cell ranges
-- `update_sheet_cell` - Update cells
-- `create_sheet` - Create spreadsheets
-- `append_to_sheet` - Append rows
-
-### Google Chat
-- `list_spaces` - List chat spaces
-- `get_messages` - Read messages
-- `send_message` - Send messages
-
-### Google Forms
-- `get_form` - Get form details
-- `list_form_responses` - List responses
-- `create_form` - Create forms
-
-### Google Slides
-- `get_presentation` - Get presentation details
-- `create_presentation` - Create presentations
-- `batch_update_presentation` - Update slides
-
-### Google Tasks
-- `list_tasks` - List tasks
-- `create_task` - Create tasks
-- `update_task` - Update tasks
-
-### Google Search
-- `search_custom` - Programmable Search Engine
-
-## Search Aliases
-
-When you search Google Drive, results are automatically cached with aliases:
-
-```
-Search results:
-[A] Project Plan - Google Doc
-[B] Budget 2024 - Google Sheet
-[C] Team Photo - Image
-```
-
-Use aliases in subsequent commands:
-```
-read_google_drive_file(file_id="A")  # Reads "Project Plan"
-```
-
-## Sync Tools
-
-The sync tools enable bidirectional synchronization between local files and Google Drive:
-
-### Linking Files
-```python
-link_local_file(local_path="docs/notes.md", file_id="A")
-```
-
-### Uploading Changes (Safe by Default)
-```python
-# Dry run - shows diff without making changes
-update_google_doc(local_path="docs/notes.md")
-
-# Apply changes
-update_google_doc(local_path="docs/notes.md", dry_run=False)
-```
-
-### Downloading Changes (Safe by Default)
-```python
-# Dry run - shows diff without making changes
-download_google_doc(local_path="docs/notes.md")
-
-# Apply changes
-download_google_doc(local_path="docs/notes.md", dry_run=False)
-```
-
-## Development
-
-### Project Structure
-
-```
-google-workspace-mcp-advanced/
-├── auth/                 # OAuth and authentication
-│   ├── google_auth.py    # Core auth logic
-│   ├── google_oauth_config.py  # Embedded credentials
-│   └── service_decorator.py # @require_google_service
-├── core/                 # Shared utilities
-│   ├── errors.py         # Custom error types
-│   ├── managers.py       # SearchManager, SyncManager
-│   └── server.py         # FastMCP server instance
-├── gdrive/               # Google Drive tools
-│   ├── drive_tools.py    # Core Drive tools
-│   └── sync_tools.py     # Sync tools
-├── gmail/                # Gmail tools
-├── gcalendar/            # Calendar tools
-├── gdocs/                # Docs tools
-├── gsheets/              # Sheets tools
-├── gchat/                # Chat tools
-├── gforms/               # Forms tools
-├── gslides/              # Slides tools
-├── gtasks/               # Tasks tools
-├── gsearch/              # Search tools
-├── main.py               # CLI entry point
-├── fastmcp_server.py     # FastMCP Cloud entry point
-└── pyproject.toml        # Package configuration
-```
-
-### Running Tests
+## Common Runtime Commands
 
 ```bash
-# Run all tests
-uv run pytest
+# Run locally from repo
+uv run google-workspace-mcp-advanced --transport stdio
 
-# Run with coverage
-uv run pytest tests/ --cov=.
+# HTTP transport
+uv run google-workspace-mcp-advanced --transport streamable-http
 
-# Run specific test file
-uv run pytest tests/integration/test_auth_flow.py
+# Single-user mode
+uv run google-workspace-mcp-advanced --single-user
+
+# Load specific service groups only
+uv run google-workspace-mcp-advanced --tools gmail drive calendar
 ```
 
-### Linting & Formatting
+## Required Environment Variables
 
-```bash
-# Check linting
-uv run ruff check .
+| Variable | Required | Description |
+|---|---|---|
+| `USER_GOOGLE_EMAIL` | Yes | Target Google account email |
+| `GOOGLE_OAUTH_CLIENT_ID` | Yes | OAuth client ID |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | Yes | OAuth client secret |
+| `WORKSPACE_MCP_CONFIG_DIR` | No | Config/credential directory override |
 
-# Auto-fix issues
-uv run ruff check --fix .
+## Documentation
 
-# Format code
-uv run ruff format .
-```
+- User docs: [docs/INDEX.md](docs/INDEX.md)
+- MCP setup guide: [docs/setup/MCP_CLIENT_SETUP_GUIDE.md](docs/setup/MCP_CLIENT_SETUP_GUIDE.md)
+- Distribution/release guide: [docs/DISTRIBUTION_RELEASE.md](docs/DISTRIBUTION_RELEASE.md)
+- Comparison with upstream: [docs/COMPARISON.md](docs/COMPARISON.md)
 
-## Recent Updates
-
-### v0.9.1 - Codebase Refactor
-- **Modular Architecture**: Split monolithic tool files into domain-specific modules
-- **Improved Maintainability**: Clearer separation of concerns for Gmail, Drive, and Docs
-- **Public API Preservation**: Backward-compatible package structure
-- **Circular Dependency Fixes**: Resolved import cycles in core/auth modules
-
-### v0.9.0 - Session Persistence & Auth Improvements
-- **Session persistence**: Credentials now survive server restarts
-- **Atomic file writes**: Prevents credential corruption on crash
-- **Credential recovery**: Automatic recovery from file store on restart
-- **Auth diagnostics**: Enable with `AUTH_DIAGNOSTICS=1` for debugging
-- **100+ tools**: Expanded tool coverage across all services
-
-### v0.8.0 - Architecture Improvements
-- Consolidated auth providers and middleware
-- Added DI container and extended error hierarchy
-- Improved single-user mode auto-recovery
-
-## License
-
-MIT License.
+Contributor docs live in `AGENTS.md` and `agent-docs/`.
