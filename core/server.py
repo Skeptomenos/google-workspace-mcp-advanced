@@ -2,6 +2,7 @@ import logging
 import os
 from collections.abc import Callable
 from importlib import import_module, metadata
+from typing import Any
 
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastmcp import FastMCP
@@ -42,7 +43,7 @@ session_middleware = Middleware(MCPSessionMiddleware)
 
 # Custom FastMCP that adds secure middleware stack for OAuth 2.1
 class SecureFastMCP(FastMCP):
-    def tool(self, *args, **kwargs):
+    def tool(self, *args: Any, **kwargs: Any) -> Any:  # type: ignore[override]
         """
         Preserve legacy FastMCP tool attributes across FastMCP versions.
 
@@ -50,16 +51,19 @@ class SecureFastMCP(FastMCP):
         while newer versions may return the original function object.
         Keep both shapes compatible for tests and internal helpers.
         """
-        base_decorator = super().tool(*args, **kwargs)
+        registered_or_decorator = super().tool(*args, **kwargs)
         explicit_name = kwargs.get("name")
 
-        def compatibility_decorator(func: Callable):
-            registered_tool = base_decorator(func)
-            tool_name = getattr(registered_tool, "name", None) or explicit_name or getattr(func, "__name__", None)
+        def ensure_legacy_attrs(registered_tool: Any, source_fn: Callable[..., Any] | None = None) -> Any:
+            tool_name = getattr(registered_tool, "name", None) or explicit_name
+
+            if source_fn is None:
+                candidate_fn = getattr(registered_tool, "fn", None)
+                source_fn = candidate_fn if callable(candidate_fn) else None
 
             try:
-                if not hasattr(registered_tool, "fn"):
-                    registered_tool.fn = func
+                if source_fn is not None and not hasattr(registered_tool, "fn"):
+                    registered_tool.fn = source_fn
                 if tool_name and not hasattr(registered_tool, "name"):
                     registered_tool.name = tool_name
             except Exception:
@@ -67,6 +71,13 @@ class SecureFastMCP(FastMCP):
                 pass
 
             return registered_tool
+
+        if args and callable(args[0]) and not isinstance(args[0], str):
+            return ensure_legacy_attrs(registered_or_decorator, args[0])
+
+        def compatibility_decorator(func: Callable[..., Any]) -> Any:
+            registered_tool = registered_or_decorator(func)
+            return ensure_legacy_attrs(registered_tool, func)
 
         return compatibility_decorator
 
