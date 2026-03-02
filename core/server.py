@@ -1,5 +1,6 @@
 import logging
 import os
+from collections.abc import Callable
 from importlib import import_module, metadata
 
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -41,6 +42,34 @@ session_middleware = Middleware(MCPSessionMiddleware)
 
 # Custom FastMCP that adds secure middleware stack for OAuth 2.1
 class SecureFastMCP(FastMCP):
+    def tool(self, *args, **kwargs):
+        """
+        Preserve legacy FastMCP tool attributes across FastMCP versions.
+
+        Some FastMCP versions return objects exposing ``.fn``/``.name``,
+        while newer versions may return the original function object.
+        Keep both shapes compatible for tests and internal helpers.
+        """
+        base_decorator = super().tool(*args, **kwargs)
+        explicit_name = kwargs.get("name")
+
+        def compatibility_decorator(func: Callable):
+            registered_tool = base_decorator(func)
+            tool_name = getattr(registered_tool, "name", None) or explicit_name or getattr(func, "__name__", None)
+
+            try:
+                if not hasattr(registered_tool, "fn"):
+                    registered_tool.fn = func
+                if tool_name and not hasattr(registered_tool, "name"):
+                    registered_tool.name = tool_name
+            except Exception:
+                # If the tool object is immutable, keep FastMCP default behavior.
+                pass
+
+            return registered_tool
+
+        return compatibility_decorator
+
     def streamable_http_app(self) -> "Starlette":
         """Override to add secure middleware stack for OAuth 2.1."""
         app = super().streamable_http_app()  # type: ignore[misc]
