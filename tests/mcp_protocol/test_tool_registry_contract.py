@@ -12,7 +12,7 @@ def _client_config() -> dict:
     user_email = os.getenv("USER_GOOGLE_EMAIL", "david@helmus.me")
     return {
         "mcpServers": {
-            "gws-mcp-advanced": {
+            "google-workspace": {
                 "command": "uv",
                 "args": ["run", "python", "main.py", "--transport", "stdio"],
                 "cwd": ".",

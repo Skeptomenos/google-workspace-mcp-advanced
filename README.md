@@ -69,7 +69,8 @@ uvx google-workspace-mcp-advanced==1.0.1 --transport stdio
    - enter the user code,
    - retry your tool call.
 4. In `streamable-http`, complete callback auth by opening the OAuth URL shown by the server.
-5. Credentials are saved in `~/.config/gws-mcp-advanced/credentials/`.
+5. Credentials are saved in `~/.config/google-workspace-mcp-advanced/credentials/`.
+6. Legacy directory `~/.config/gws-mcp-advanced/` is still supported for migration.
 
 ## Local Development Mode
 
@@ -143,10 +144,17 @@ uv run google-workspace-mcp-advanced --tools gmail drive calendar
 | `WORKSPACE_MCP_CONFIG_DIR` | No | Config/credential directory override |
 | `WORKSPACE_MCP_AUTH_FLOW` | No | Auth interaction mode: `auto` (default), `device`, or `callback` |
 
+## Migration from Legacy Name
+
+If you previously ran the project as `gws-mcp-advanced`, follow:
+
+- [Migration Guide (legacy name/path to current)](docs/setup/MIGRATING_FROM_GWS_MCP_ADVANCED.md)
+
 ## Documentation
 
 - User docs: [docs/INDEX.md](docs/INDEX.md)
 - Client setup hub: [docs/setup/MCP_CLIENT_SETUP_GUIDE.md](docs/setup/MCP_CLIENT_SETUP_GUIDE.md)
+- Migration guide: [docs/setup/MIGRATING_FROM_GWS_MCP_ADVANCED.md](docs/setup/MIGRATING_FROM_GWS_MCP_ADVANCED.md)
 - Authentication model: [docs/setup/AUTHENTICATION_MODEL.md](docs/setup/AUTHENTICATION_MODEL.md)
 - Claude Code setup: [docs/setup/CLAUDE_CODE_MCP_SETUP.md](docs/setup/CLAUDE_CODE_MCP_SETUP.md)
 - Cursor setup: [docs/setup/CURSOR_MCP_SETUP.md](docs/setup/CURSOR_MCP_SETUP.md)

@@ -1,1 +1,1 @@
-"""Unit tests for gws-mcp-advanced."""
+"""Unit tests for google-workspace-mcp-advanced."""

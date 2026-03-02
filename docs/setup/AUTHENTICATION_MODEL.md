@@ -62,8 +62,10 @@ For most users, this is enough. You do not need to call auth tools manually.
 ## Credential and Session Persistence
 
 - Primary config directory:
-  - default: `~/.config/gws-mcp-advanced`
+  - default: `~/.config/google-workspace-mcp-advanced`
   - override: `WORKSPACE_MCP_CONFIG_DIR`
+- Legacy compatibility path:
+  - `~/.config/gws-mcp-advanced` (auto-migrated/fallback-supported when `WORKSPACE_MCP_CONFIG_DIR` is not set)
 - Legacy compatibility override:
   - `GOOGLE_MCP_CREDENTIALS_DIR` (takes precedence when set)
 - Credential files are stored under:
@@ -136,6 +138,7 @@ Practical recovery sequence:
 ## Related Docs
 
 - [MCP Client Setup Guide](MCP_CLIENT_SETUP_GUIDE.md)
+- [Migration Guide](MIGRATING_FROM_GWS_MCP_ADVANCED.md)
 - [Claude Code Setup](CLAUDE_CODE_MCP_SETUP.md)
 - [Cursor Setup](CURSOR_MCP_SETUP.md)
 - [OpenCode Setup](OPENCODE_MCP_SETUP.md)

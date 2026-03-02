@@ -2,11 +2,11 @@
 
 ## Living Document Controls
 1. Status: `IN_IMPLEMENTATION`
-2. Last Updated (UTC): `2026-03-02T21:34:45Z`
+2. Last Updated (UTC): `2026-03-02T22:50:00Z`
 3. Canonical Path: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/PLAN.md`
 4. Active Branch: `main`
 5. Local Task Board: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/TASKS.md`
-6. Overall Progress: `81.8%` (`18/22` issues `Done`; `1/22` `In Progress`; `3/22` `Not Started`)
+6. Overall Progress: `82.6%` (`19/23` issues `Done`; `1/23` `In Progress`; `3/23` `Not Started`)
 7. Update Cadence:
    1. update this file after every completed issue ID (`SEC-*`, `SAFE-*`, `DIST-*`, etc.),
    2. update this file at the end of each implementation session,
@@ -67,6 +67,7 @@
 | DIST-02 | Done | Codex | codex/run-01-fastmcp-import-smoke | - | npm launcher preflight/remediation path is implemented and automated smoke tests are in place (`tests/unit/core/test_npm_launcher.py`) and wired into CI. | 2026-03-01 |
 | DIST-03 | Done | Codex | codex/run-01-fastmcp-import-smoke | - | Deterministic pinned install and rollback guidance is documented in README + `docs/DISTRIBUTION_RELEASE.md`. | 2026-03-01 |
 | DIST-04 | Done | Codex | codex/run-01-fastmcp-import-smoke | - | npm provenance/auth path is de-scoped by product decision because npm/npx distribution is no longer in the release-critical path. | 2026-03-02 |
+| DIST-05 | Done | Codex | main | - | Canonical rename/migration hardening is complete: runtime/config defaults use `google-workspace-mcp-advanced`, legacy config path fallback is preserved, migration guide is published, and verification is green (`628 passed`, `3 skipped`). | 2026-03-02 |
 
 ## Summary
 This plan follows the Codex ExecPlan model and is scoped to **actionable current issues**, sequenced in **risk-first waves**, with a **full MCP harness + live smoke testing** strategy using `david@helmus.me` in **full-write mode**.
@@ -97,7 +98,7 @@ The plan resolves:
 ## Baseline (Current Reality to Plan Against)
 1. Lint: `ruff check` passes.
 2. Formatter is enforced in CI with `--check`, and local verification is now green.
-3. Tests: `pytest` passes (606 tests), coverage ~45%.
+3. Tests: `pytest` passes (631 collected; `628 passed`, `3 skipped`), coverage ~45%.
 4. Runtime regression in `fastmcp_server.py` import path has been fixed in `RUN-01`.
 5. `SEC-01` implemented: unverified JWT identity extraction is denied by default; break-glass override is explicit and logged.
 6. `SEC-02` implemented: credential and session JSON persistence now use centralized secure atomic writes with restrictive permissions.
@@ -122,6 +123,7 @@ The plan resolves:
 | RM-03 | P3 | Extra empty bullet after task lists | Add explicit post-task-list bullet reset behavior and regression tests | `gdocs/markdown_parser.py`, tests |
 | RM-04 | P3 | Images are implemented but insufficiently verified | Add deterministic tests for image insertion paths and structure assertions | `gdocs/markdown_parser.py`, integration/live tests |
 | DIST-00 | P1 | Distribution package naming mismatch across docs/plans | Standardize to `google-workspace-mcp-advanced` for PyPI/uvx examples and release automation | `PLAN.md`, `README.md`, `docs/DISTRIBUTION_RELEASE.md`, release metadata |
+| DIST-05 | P1 | Legacy runtime/config naming drift (`gws-mcp-advanced`) persists in defaults/docs/log output | Rename canonical runtime/config identifiers to `google-workspace-mcp-advanced`, add startup migration from legacy config dir, and publish explicit migration steps for existing users | `auth/config.py`, `auth/credential_types/store.py`, `core/managers.py`, `core/utils.py`, `README.md`, `docs/setup/*` |
 
 ## Open Roadmap Items Included
 1. PSE-backed `search_custom` enablement remains intentionally deferred (`OP-06`) by product decision.
@@ -411,6 +413,7 @@ The plan resolves:
 
 | Date (UTC) | Scope | Commands | Result | Notes |
 |---|---|---|---|---|
+| 2026-03-02 | DIST-05 rename/migration hardening | `uv run ruff check . && uv run ruff format --check . && uv run pytest` | Pass | Canonical runtime/config rename + migration-guide/docs/test naming cleanup verified (`628 passed`, `3 skipped`) |
 | 2026-02-27 | Baseline | `uv run ruff check .` | Pass | - |
 | 2026-02-27 | Baseline | `uv run ruff format --check .` | Fail | `gcalendar/calendar_tools.py` requires formatting |
 | 2026-02-27 | Baseline | `uv run pytest -q` | Pass | 459 passed |
@@ -525,13 +528,13 @@ The plan resolves:
 | 2026-02-28 | Keep OpenCode live lifecycle smoke opt-in (`OPENCODE_SMOKE_LIVE=1`) | Preserve deterministic local validation of prompt execution/teardown without forcing model/provider credentials in default test runs | OPC-01, QUAL-02 |
 
 ## Session Handoff (Living)
-1. Current Focus: `Finalize uvx-first rollout (docs sync, verification, commit/push/merge)`
+1. Current Focus: `Close AUTH-01 remaining validation and evidence updates`
 2. Next 3 Actions:
-   1. complete final user-doc cleanup for uvx-only guidance,
-   2. run verification protocol (`ruff`, `format --check`, `pytest`),
-   3. commit, push, and merge.
+   1. run post-release MCP auth validation in OpenCode/Claude Code with current `v1.0.1` package path,
+   2. close remaining AUTH-01 WS-01/WS-04 tracking items with current evidence,
+   3. prepare commit/push for the DIST-05 rename/migration hardening set.
 3. Active Blockers:
-   1. `OP-06` remains intentionally deferred by product decision.
+   1. `AUTH-01` remains open pending final manual validation evidence closure.
 
 ## Execution Changelog (Living)
 1. 2026-02-27: Promoted `PLAN.md` to canonical living execution doc; added readiness verdict, wave schedule, issue tracker, update protocol, evidence log, decision log, and session handoff.
@@ -610,3 +613,5 @@ The plan resolves:
 74. 2026-03-02: `Release npm` auto-trigger run (`22577900946`) passed verification gates and provenance generation but failed final publish with npm auth error (`Access token expired or revoked`, `E404` PUT publish). Distribution closure now depends on npm auth/trusted-publisher remediation.
 75. 2026-03-02: Product decision updated distribution scope to uvx-only for now; npm/npx wrapper lane is explicitly de-scoped (retained in-repo for possible future reactivation) and no longer tracked as a release blocker.
 76. 2026-03-02: Finalized uvx-only user-doc rollout (README/setup/distribution guides), reconciled roadmap/testing docs to de-scope npm blockers, and re-ran full verification protocol (`uv run ruff check .`, `uv run ruff format --check .`, `uv run pytest`) with green results (`615 passed`, `3 skipped`).
+77. 2026-03-02: Started `DIST-05` rename/migration hardening to make canonical runtime/config identity fully consistent (`google-workspace-mcp-advanced`) while preserving backward compatibility via legacy config-directory fallback; `PLAN.md` updated first to preserve state before compaction.
+78. 2026-03-02: Closed `DIST-05` by completing canonical runtime/config naming cleanup (including `core/utils.py`, sync-map defaults, auth store fallback migration), publishing `docs/setup/MIGRATING_FROM_GWS_MCP_ADVANCED.md`, cleaning active docs/tests naming drift, and re-running full verification (`628 passed`, `3 skipped`).

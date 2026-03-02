@@ -13,7 +13,7 @@ from datetime import datetime
 
 from google.oauth2.credentials import Credentials
 
-from auth.config import get_credentials_directory
+from auth.config import get_credentials_directory, get_legacy_credentials_directory
 from auth.security_io import atomic_write_json, ensure_secure_directory
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,7 @@ class LocalDirectoryCredentialStore(CredentialStore):
     """Credential store that uses local JSON files for storage."""
 
     def __init__(self, base_dir: str | None = None):
+        self.legacy_base_dir: str | None = None
         if base_dir is None:
             env_dir = os.getenv("GOOGLE_MCP_CREDENTIALS_DIR")
             if env_dir:
@@ -55,6 +56,9 @@ class LocalDirectoryCredentialStore(CredentialStore):
                 # Use centralized config directory from auth.config,
                 # which respects WORKSPACE_MCP_CONFIG_DIR env var.
                 base_dir = os.path.join(get_credentials_directory(), "credentials")
+                legacy_base_dir = os.path.join(get_legacy_credentials_directory(), "credentials")
+                if os.path.abspath(legacy_base_dir) != os.path.abspath(base_dir):
+                    self.legacy_base_dir = legacy_base_dir
 
         self.base_dir: str = base_dir
         logger.info(f"LocalJsonCredentialStore initialized with base_dir: {base_dir}")
@@ -67,14 +71,9 @@ class LocalDirectoryCredentialStore(CredentialStore):
             logger.info(f"Created credentials directory: {self.base_dir}")
         return os.path.join(self.base_dir, f"{user_email}.json")
 
-    def get_credential(self, user_email: str) -> Credentials | None:
-        """Get credentials from local JSON file."""
-        creds_path = self._get_credential_path(user_email)
-
-        if not os.path.exists(creds_path):
-            logger.debug(f"No credential file found for {user_email} at {creds_path}")
-            return None
-
+    @staticmethod
+    def _load_credentials_from_path(user_email: str, creds_path: str) -> Credentials | None:
+        """Load credentials from a specific JSON path."""
         try:
             with open(creds_path) as f:
                 creds_data = json.load(f)
@@ -100,10 +99,29 @@ class LocalDirectoryCredentialStore(CredentialStore):
 
             logger.debug(f"Loaded credentials for {user_email} from {creds_path}")
             return credentials
-
         except (OSError, json.JSONDecodeError, KeyError) as e:
             logger.error(f"Error loading credentials for {user_email} from {creds_path}: {e}")
             return None
+
+    def get_credential(self, user_email: str) -> Credentials | None:
+        """Get credentials from local JSON file."""
+        creds_path = self._get_credential_path(user_email)
+
+        if os.path.exists(creds_path):
+            return self._load_credentials_from_path(user_email, creds_path)
+
+        if self.legacy_base_dir:
+            legacy_path = os.path.join(self.legacy_base_dir, f"{user_email}.json")
+            if os.path.exists(legacy_path):
+                logger.warning(
+                    "Loaded credentials from legacy path %s. Migrate to %s or set WORKSPACE_MCP_CONFIG_DIR.",
+                    legacy_path,
+                    self.base_dir,
+                )
+                return self._load_credentials_from_path(user_email, legacy_path)
+
+        logger.debug(f"No credential file found for {user_email} at {creds_path}")
+        return None
 
     def store_credential(self, user_email: str, credentials: Credentials) -> bool:
         """Store credentials to local JSON file."""
@@ -130,34 +148,44 @@ class LocalDirectoryCredentialStore(CredentialStore):
     def delete_credential(self, user_email: str) -> bool:
         """Delete credential file for a user."""
         creds_path = self._get_credential_path(user_email)
+        legacy_path = os.path.join(self.legacy_base_dir, f"{user_email}.json") if self.legacy_base_dir else None
 
         try:
+            deleted = False
             if os.path.exists(creds_path):
                 os.remove(creds_path)
                 logger.info(f"Deleted credentials for {user_email} from {creds_path}")
-                return True
-            else:
+                deleted = True
+            if legacy_path and os.path.exists(legacy_path):
+                os.remove(legacy_path)
+                logger.info(f"Deleted credentials for {user_email} from legacy path {legacy_path}")
+                deleted = True
+
+            if not deleted:
                 logger.debug(f"No credential file to delete for {user_email} at {creds_path}")
-                return True
+            return True
         except OSError as e:
             logger.error(f"Error deleting credentials for {user_email} from {creds_path}: {e}")
             return False
 
     def list_users(self) -> list[str]:
         """List all users with credential files."""
-        if not os.path.exists(self.base_dir):
-            return []
+        users: set[str] = set()
+        paths_to_check = [self.base_dir]
+        if self.legacy_base_dir:
+            paths_to_check.append(self.legacy_base_dir)
 
-        users = []
-        try:
-            for filename in os.listdir(self.base_dir):
-                if filename.endswith(".json"):
-                    user_email = filename[:-5]
-                    users.append(user_email)
-            logger.debug(f"Found {len(users)} users with credentials in {self.base_dir}")
-        except OSError as e:
-            logger.error(f"Error listing credential files in {self.base_dir}: {e}")
+        for path in paths_to_check:
+            if not os.path.exists(path):
+                continue
+            try:
+                for filename in os.listdir(path):
+                    if filename.endswith(".json"):
+                        users.add(filename[:-5])
+            except OSError as e:
+                logger.error(f"Error listing credential files in {path}: {e}")
 
+        logger.debug(f"Found {len(users)} users across credential directories")
         return sorted(users)
 
 

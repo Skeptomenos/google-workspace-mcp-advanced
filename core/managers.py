@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from auth.config import get_sync_map_path
+
 # ============================================================================
 # Data Classes
 # ============================================================================
@@ -140,7 +142,7 @@ def _default_sync_map_path() -> Path:
     injection. The composition root (core/server.py or core/container.py)
     should inject the actual path from auth.config.get_sync_map_path().
     """
-    return Path.home() / ".config" / "gws-mcp-advanced" / "sync_map.json"
+    return Path(get_sync_map_path())
 
 
 class SyncManager:
@@ -151,7 +153,7 @@ class SyncManager:
 
     Args:
         sync_map_path: Path to the sync map file. If None, uses default
-            (~/.config/gws-mcp-advanced/sync_map.json). Composition roots
+            (~/.config/google-workspace-mcp-advanced/sync_map.json). Composition roots
             should inject this via auth.config.get_sync_map_path().
     """
 

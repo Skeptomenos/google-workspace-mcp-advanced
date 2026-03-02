@@ -44,6 +44,7 @@ uv --version
 4. In `streamable-http` mode, open the OAuth callback URL and complete consent.
 5. Re-run the tool call to finalize auth and confirm connectivity.
 6. For architecture, mode behavior, and security flags, see [Authentication Model](AUTHENTICATION_MODEL.md).
+7. If you are upgrading from the legacy package/path, use [Migration Guide](MIGRATING_FROM_GWS_MCP_ADVANCED.md).
 
 ## Best Practices
 

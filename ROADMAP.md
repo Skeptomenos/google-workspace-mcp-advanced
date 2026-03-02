@@ -1,7 +1,7 @@
 # Product Roadmap
 
 ## Metadata
-- Last Updated (UTC): 2026-03-01T21:00:38Z
+- Last Updated (UTC): 2026-03-02T22:35:00Z
 - Canonical Execution Plan: `agent-docs/roadmap/PLAN.md`
 - Canonical Manual Matrix: `agent-docs/testing/OPENCODE_MCP_MANUAL_TESTING.md`
 
@@ -26,10 +26,13 @@
    - Revisit trigger: when unified web-search routing through this MCP becomes a product requirement.
 
 ## Next Roadmap Focus
-1. Distribution wave (`DIST-00`..`DIST-04`):
-   - Scoped npm launcher (`@skeptomenos/gws-mcp-advanced`)
-   - Release coupling and publish guardrails
-   - Pinned-version rollout guidance
+1. Rename and migration hardening (`DIST-05`):
+   - Complete canonical naming cleanup in runtime defaults/docs/tests
+   - Keep legacy config directory compatibility with explicit migration guidance
+2. Smart-chip extension stream (`RM-05`..`RM-07`):
+   - Native checklist bullets
+   - Mention-to-chip mapping
+   - Add-ons-backed third-party chips feasibility
 
 ## Closure Notes
 1. Markdown formatting is no longer an active roadmap risk area.

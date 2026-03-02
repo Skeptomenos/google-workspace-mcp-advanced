@@ -2,7 +2,7 @@
 
 ## 1. PROJECT OVERVIEW
 
-**gws-mcp-advanced** - High-performance MCP server for Google Workspace integration.
+**google-workspace-mcp-advanced** - High-performance MCP server for Google Workspace integration.
 Provides 50+ async tools for Gmail, Drive, Calendar, Docs, Sheets, Chat, Forms, Slides, Tasks, and Search.
 
 ## 2. DEV STANDARDS (STRICT)
@@ -62,5 +62,5 @@ Before marking a task as complete, run these commands in order:
 ## 5. ENVIRONMENT & SECURITY
 
 - `USER_GOOGLE_EMAIL`: Target Google account email (Required).
-- `WORKSPACE_MCP_CONFIG_DIR`: Credentials directory (default: `~/.config/google-workspace-mcp`).
+- `WORKSPACE_MCP_CONFIG_DIR`: Credentials directory (default: `~/.config/google-workspace-mcp-advanced`).
 - **Never** hardcode secrets. **Never** log OAuth tokens. **Never** log PII (emails/content) in production.

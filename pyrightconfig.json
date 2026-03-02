@@ -25,6 +25,7 @@
     "docs",
     "tests",
     "tmp",
-    "gws_mcp_advanced.egg-info"
+    "gws_mcp_advanced.egg-info",
+    "google_workspace_mcp_advanced.egg-info"
   ]
 }

@@ -9,7 +9,10 @@ Provides a single source of truth for all OAuth-related settings.
 Supports both OAuth 2.0 and OAuth 2.1 with automatic client capability detection.
 """
 
+import logging
 import os
+import shutil
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -28,8 +31,56 @@ GOOGLE_OAUTH_CLIENT_ID_EMBEDDED = ""
 GOOGLE_OAUTH_CLIENT_SECRET_EMBEDDED = ""
 
 # Application metadata
-GOOGLE_WORKSPACE_MCP_APP_NAME = "GWS MCP Advanced"
-GOOGLE_WORKSPACE_MCP_CREDENTIALS_DIR = "~/.config/gws-mcp-advanced"
+GOOGLE_WORKSPACE_MCP_APP_NAME = "Google Workspace MCP Advanced"
+GOOGLE_WORKSPACE_MCP_CREDENTIALS_DIR = "~/.config/google-workspace-mcp-advanced"
+GOOGLE_WORKSPACE_MCP_LEGACY_CREDENTIALS_DIR = "~/.config/gws-mcp-advanced"
+
+logger = logging.getLogger(__name__)
+_legacy_config_migration_attempted = False
+
+
+def _is_empty_directory(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    return not any(path.iterdir())
+
+
+def _migrate_legacy_config_directory_if_needed() -> None:
+    """Migrate legacy default config directory to canonical path when possible."""
+    global _legacy_config_migration_attempted
+
+    if _legacy_config_migration_attempted:
+        return
+    _legacy_config_migration_attempted = True
+
+    # Explicit overrides are authoritative; do not migrate automatically.
+    if os.getenv("WORKSPACE_MCP_CONFIG_DIR"):
+        return
+
+    legacy_dir = Path(os.path.expanduser(GOOGLE_WORKSPACE_MCP_LEGACY_CREDENTIALS_DIR))
+    if not legacy_dir.exists():
+        return
+
+    canonical_dir = Path(os.path.expanduser(GOOGLE_WORKSPACE_MCP_CREDENTIALS_DIR))
+    should_migrate = (not canonical_dir.exists()) or _is_empty_directory(canonical_dir)
+    if not should_migrate:
+        return
+
+    try:
+        canonical_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(legacy_dir, canonical_dir, dirs_exist_ok=True)
+        logger.warning(
+            "Migrated legacy config directory from %s to %s. You can override with WORKSPACE_MCP_CONFIG_DIR.",
+            legacy_dir,
+            canonical_dir,
+        )
+    except OSError as exc:
+        logger.warning(
+            "Could not auto-migrate legacy config directory from %s to %s: %s",
+            legacy_dir,
+            canonical_dir,
+            exc,
+        )
 
 
 class OAuthConfig:
@@ -493,8 +544,17 @@ def get_credentials_directory() -> str:
     Returns:
         Expanded path to credentials directory.
     """
-    base_dir = os.getenv("WORKSPACE_MCP_CONFIG_DIR", GOOGLE_WORKSPACE_MCP_CREDENTIALS_DIR)
-    return os.path.expanduser(base_dir)
+    configured_dir = os.getenv("WORKSPACE_MCP_CONFIG_DIR")
+    if configured_dir:
+        return os.path.expanduser(configured_dir)
+
+    _migrate_legacy_config_directory_if_needed()
+    return os.path.expanduser(GOOGLE_WORKSPACE_MCP_CREDENTIALS_DIR)
+
+
+def get_legacy_credentials_directory() -> str:
+    """Get the legacy default config directory path used by older releases."""
+    return os.path.expanduser(GOOGLE_WORKSPACE_MCP_LEGACY_CREDENTIALS_DIR)
 
 
 def get_sync_map_path() -> str:

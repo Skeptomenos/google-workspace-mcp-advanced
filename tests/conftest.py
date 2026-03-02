@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for gws-mcp-advanced tests."""
+"""Shared pytest fixtures for google-workspace-mcp-advanced tests."""
 
 import tempfile
 from unittest.mock import MagicMock

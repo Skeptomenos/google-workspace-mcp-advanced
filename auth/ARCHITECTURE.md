@@ -56,7 +56,7 @@ oauth21_session_store.py
 
 | Store | Type | Location | Survives Restart |
 |-------|------|----------|------------------|
-| LocalDirectoryCredentialStore | File | `~/.config/gws-mcp-advanced/credentials/{email}.json` | Yes |
+| LocalDirectoryCredentialStore | File | `~/.config/google-workspace-mcp-advanced/credentials/{email}.json` (legacy fallback: `~/.config/gws-mcp-advanced/credentials/{email}.json`) | Yes |
 | OAuth21SessionStore._sessions | Memory | N/A | No |
 | OAuth21SessionStore._mcp_session_mapping | Memory + Disk | `sessions.json` | Yes (v0.2.0+) |
 | OAuth21SessionStore._session_auth_binding | Memory + Disk | `sessions.json` | Yes (v0.2.0+) |

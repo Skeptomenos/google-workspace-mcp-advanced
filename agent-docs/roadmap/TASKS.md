@@ -8,7 +8,7 @@ Status dashboard: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-
 Dry-run tracker: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/DRY_RUN_MATRIX.md`
 
 ## Metadata
-- Last Updated (UTC): 2026-03-02T21:34:45Z
+- Last Updated (UTC): 2026-03-02T22:50:00Z
 - Active Branch: `main`
 - Owner: Codex
 
@@ -48,6 +48,7 @@ Dry-run tracker: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-m
 | DIST-02 | 5 | Done | Completed: launcher preflight/remediation and automated launcher smoke tests added |
 | DIST-03 | 6 | Done | Completed: pinned install and rollback runbook documented |
 | DIST-04 | 5 | Done | npm/npx lane is de-scoped by product decision and no longer blocks distribution readiness |
+| DIST-05 | 6 | Done | Completed: canonical rename/migration hardening (runtime/config naming cleanup, legacy fallback support, migration guide, docs/tests alignment) with green verification (`628 passed`, `3 skipped`) |
 
 ## Wave 0 Tasks
 

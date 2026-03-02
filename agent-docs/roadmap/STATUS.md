@@ -5,9 +5,9 @@ Detailed implementation scope and issue-level tracking live in:
 `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/PLAN.md`
 
 ## Metadata
-- Last Updated (UTC): 2026-03-02T21:34:45Z
+- Last Updated (UTC): 2026-03-02T22:50:00Z
 - Active Branch: `main`
-- Overall Status: Authentication stabilization hotfix `AUTH-01` is release-triggered (`v1.0.1` tag pushed) and pending external PyPI workflow verification plus post-release manual MCP validation. Canonical execution plan: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/AUTH_STABILIZATION_PLAN.md`.
+- Overall Status: Rename/migration hardening `DIST-05` is complete and verified; `AUTH-01` remains the only in-progress track pending final manual MCP auth validation evidence closure. Canonical execution plan: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/AUTH_STABILIZATION_PLAN.md`.
 - Implementation Readiness: `YES`
 
 ## Baseline Verification Snapshot
@@ -36,9 +36,9 @@ Detailed implementation scope and issue-level tracking live in:
 | Wave 6 | Distribution validation and rollout | Done | uvx stable/pinned validation is complete (`DT-01`..`DT-03`, `DT-08`) |
 
 ## Current Focus
-1. Verify `Release PyPI` workflow completion for `v1.0.1`.
-2. Execute manual MCP-hosted auth validation (`WORKSPACE_MCP_AUTH_FLOW=auto`) in OpenCode/Claude Code.
-3. Close remaining AUTH-01 gaps (WS-01.5 parity evidence, WS-04 credential-source diagnostics/tests).
+1. Execute manual MCP-hosted auth validation (`WORKSPACE_MCP_AUTH_FLOW=auto`) in OpenCode/Claude Code.
+2. Close remaining AUTH-01 gaps (WS-01.5 parity evidence, WS-04 credential-source diagnostics/tests).
+3. Commit/push the DIST-05 rename/migration completion set.
 
 ## Open Blockers
 1. `AUTH-01` must be completed before next production rollout.
