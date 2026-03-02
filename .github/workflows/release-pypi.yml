@@ -31,6 +31,11 @@ jobs:
       - name: Install dependencies
         run: uv pip install -e ".[dev]" --system
 
+      - name: Set up Node (required by pyright)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Validate Python/npm version coupling
         run: uv run python scripts/check_release_version_match.py
 
