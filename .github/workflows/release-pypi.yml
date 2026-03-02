@@ -42,12 +42,12 @@ jobs:
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           PROJECT_VERSION="$(python - <<'PY'
-import tomllib
-from pathlib import Path
-data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-print(data["project"]["version"])
-PY
-)"
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(data["project"]["version"])
+          PY
+          )"
           if [ "$TAG_VERSION" != "$PROJECT_VERSION" ]; then
             echo "Tag version ($TAG_VERSION) does not match pyproject version ($PROJECT_VERSION)"
             exit 1
@@ -58,12 +58,12 @@ PY
         run: |
           INPUT_VERSION="${{ github.event.inputs.version }}"
           PROJECT_VERSION="$(python - <<'PY'
-import tomllib
-from pathlib import Path
-data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-print(data["project"]["version"])
-PY
-)"
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(data["project"]["version"])
+          PY
+          )"
           if [ "$INPUT_VERSION" != "$PROJECT_VERSION" ]; then
             echo "Input version ($INPUT_VERSION) does not match pyproject version ($PROJECT_VERSION)"
             exit 1
