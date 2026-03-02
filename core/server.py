@@ -1,6 +1,8 @@
 import logging
 import os
-from importlib import metadata
+from collections.abc import Callable
+from importlib import import_module, metadata
+from typing import Any
 
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastmcp import FastMCP
@@ -41,6 +43,43 @@ session_middleware = Middleware(MCPSessionMiddleware)
 
 # Custom FastMCP that adds secure middleware stack for OAuth 2.1
 class SecureFastMCP(FastMCP):
+    def tool(self, *args: Any, **kwargs: Any) -> Any:  # type: ignore[override]
+        """
+        Preserve legacy FastMCP tool attributes across FastMCP versions.
+
+        Some FastMCP versions return objects exposing ``.fn``/``.name``,
+        while newer versions may return the original function object.
+        Keep both shapes compatible for tests and internal helpers.
+        """
+        registered_or_decorator = super().tool(*args, **kwargs)
+        explicit_name = kwargs.get("name")
+
+        def ensure_legacy_attrs(registered_tool: Any, source_fn: Callable[..., Any] | None = None) -> Any:
+            if source_fn is None:
+                candidate_fn = getattr(registered_tool, "fn", None)
+                source_fn = candidate_fn if callable(candidate_fn) else None
+            tool_name = getattr(registered_tool, "name", None) or explicit_name or getattr(source_fn, "__name__", None)
+
+            try:
+                if source_fn is not None and not hasattr(registered_tool, "fn"):
+                    registered_tool.fn = source_fn
+                if tool_name and not hasattr(registered_tool, "name"):
+                    registered_tool.name = tool_name
+            except Exception:
+                # If the tool object is immutable, keep FastMCP default behavior.
+                pass
+
+            return registered_tool
+
+        if args and callable(args[0]) and not isinstance(args[0], str):
+            return ensure_legacy_attrs(registered_or_decorator, args[0])
+
+        def compatibility_decorator(func: Callable[..., Any]) -> Any:
+            registered_tool = registered_or_decorator(func)
+            return ensure_legacy_attrs(registered_tool, func)
+
+        return compatibility_decorator
+
     def streamable_http_app(self) -> "Starlette":
         """Override to add secure middleware stack for OAuth 2.1."""
         app = super().streamable_http_app()  # type: ignore[misc]
@@ -56,7 +95,7 @@ class SecureFastMCP(FastMCP):
 
 
 server = SecureFastMCP(
-    name="google_workspace",
+    name="google-workspace",
     auth=None,
 )
 
@@ -108,6 +147,12 @@ def configure_server_for_http():
         if not config.is_configured():
             logger.warning("OAuth 2.1 enabled but OAuth credentials not configured")
             return
+        if not config.client_id or not config.client_secret:
+            logger.warning("OAuth 2.1 enabled but OAuth client_id/client_secret are missing")
+            return
+
+        client_id = config.client_id
+        client_secret = config.client_secret
 
         def validate_and_derive_jwt_key(jwt_signing_key_override: str | None, client_secret: str) -> bytes:
             """Validate JWT signing key override and derive the final JWT key."""
@@ -137,6 +182,7 @@ def configure_server_for_http():
 
             client_storage = None
             jwt_signing_key_override = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_JWT_SIGNING_KEY", "").strip() or None
+            jwt_signing_key: bytes = validate_and_derive_jwt_key(jwt_signing_key_override, client_secret)
             storage_backend = os.getenv("WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND", "").strip().lower()
             valkey_host = os.getenv("WORKSPACE_MCP_OAUTH_PROXY_VALKEY_HOST", "").strip()
 
@@ -200,15 +246,14 @@ def configure_server_for_http():
                         if valkey_connection_timeout_ms is None and (valkey_use_tls or is_remote_host):
                             valkey_connection_timeout_ms = 10000
                         if valkey_connection_timeout_ms is not None:
-                            from glide_shared.config import (
-                                AdvancedGlideClientConfiguration,
-                            )
+                            glide_shared_config = import_module("glide_shared.config")
+                            advanced_glide_config = glide_shared_config.AdvancedGlideClientConfiguration
 
-                            glide_config.advanced_config = AdvancedGlideClientConfiguration(
+                            glide_config.advanced_config = advanced_glide_config(
                                 connection_timeout=valkey_connection_timeout_ms
                             )
 
-                    jwt_signing_key = validate_and_derive_jwt_key(jwt_signing_key_override, config.client_secret)
+                    jwt_signing_key = validate_and_derive_jwt_key(jwt_signing_key_override, client_secret)
 
                     storage_encryption_key = derive_jwt_key(
                         high_entropy_material=jwt_signing_key.decode(),
@@ -266,7 +311,7 @@ def configure_server_for_http():
 
                     client_storage = DiskStore(directory=disk_directory)
 
-                    jwt_signing_key = validate_and_derive_jwt_key(jwt_signing_key_override, config.client_secret)
+                    jwt_signing_key = validate_and_derive_jwt_key(jwt_signing_key_override, client_secret)
 
                     storage_encryption_key = derive_jwt_key(
                         high_entropy_material=jwt_signing_key.decode(),
@@ -294,18 +339,14 @@ def configure_server_for_http():
                 logger.info("OAuth 2.1: Using MemoryStore for FastMCP OAuth proxy client_storage")
             # else: client_storage remains None, FastMCP uses its default
 
-            # Ensure JWT signing key is always derived for all storage backends
-            if "jwt_signing_key" not in locals():
-                jwt_signing_key = validate_and_derive_jwt_key(jwt_signing_key_override, config.client_secret)
-
             # Check if external OAuth provider is configured
             if config.is_external_oauth21_provider():
                 # External OAuth mode: use custom provider that handles ya29.* access tokens
                 from auth.providers.external import ExternalOAuthProvider
 
                 provider = ExternalOAuthProvider(
-                    client_id=config.client_id,
-                    client_secret=config.client_secret,
+                    client_id=client_id,
+                    client_secret=client_secret,
                     base_url=config.get_oauth_base_url(),
                     redirect_path=config.redirect_path,
                     required_scopes=required_scopes,
@@ -317,8 +358,8 @@ def configure_server_for_http():
             else:
                 # Standard OAuth 2.1 mode: use FastMCP's GoogleProvider
                 provider = GoogleProvider(
-                    client_id=config.client_id,
-                    client_secret=config.client_secret,
+                    client_id=client_id,
+                    client_secret=client_secret,
                     base_url=config.get_oauth_base_url(),
                     redirect_path=config.redirect_path,
                     required_scopes=required_scopes,
@@ -351,13 +392,13 @@ def get_auth_provider() -> GoogleProvider | None:
 @server.custom_route("/health", methods=["GET"])
 async def health_check(request: Request):
     try:
-        version = metadata.version("workspace-mcp")
+        version = metadata.version("google-workspace-mcp-advanced")
     except metadata.PackageNotFoundError:
         version = "dev"
     return JSONResponse(
         {
             "status": "healthy",
-            "service": "workspace-mcp",
+            "service": "google-workspace-mcp-advanced",
             "version": version,
             "transport": get_transport_mode(),
         }
@@ -423,12 +464,13 @@ async def legacy_oauth2_callback(request: Request) -> HTMLResponse:
 
         try:
             store = get_oauth21_session_store()
+            token_uri = getattr(credentials, "token_uri", None) or "https://oauth2.googleapis.com/token"
 
             store.store_session(
                 user_email=verified_user_id,
                 access_token=credentials.token,
                 refresh_token=credentials.refresh_token,
-                token_uri=credentials.token_uri,
+                token_uri=token_uri,
                 client_id=credentials.client_id,
                 client_secret=credentials.client_secret,
                 scopes=credentials.scopes,
