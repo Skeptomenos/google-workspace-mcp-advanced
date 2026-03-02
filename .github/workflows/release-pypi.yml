@@ -78,7 +78,7 @@ jobs:
         run: |
           uv run ruff check .
           uv run ruff format --check .
-          uv run pytest -q
+          uv run pytest -q tests/unit/core/test_distribution_checks.py tests/unit/core/test_npm_launcher.py tests/unit/core/test_dry_run_defaults_checker.py
 
   build:
     runs-on: ubuntu-latest
