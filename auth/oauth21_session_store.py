@@ -682,17 +682,18 @@ class OAuth21SessionStore:
         self,
         user_email: str,
         access_token: str,
-        oauth_client_key: str | None = None,
         refresh_token: str | None = None,
         token_uri: str = "https://oauth2.googleapis.com/token",
         client_id: str | None = None,
         client_secret: str | None = None,
-        scopes: list | None = None,
+        scopes: list[str] | None = None,
         expiry: Any | None = None,
         session_id: str | None = None,
         mcp_session_id: str | None = None,
         issuer: str | None = None,
-    ):
+        *,
+        oauth_client_key: str | None = None,
+    ) -> None:
         """
         Store OAuth 2.1 session information.
 
@@ -1147,7 +1148,13 @@ class OAuth21SessionStore:
     def get_stats(self) -> dict[str, Any]:
         """Get store statistics."""
         with self._lock:
-            users = sorted({info.get("user_email") for info in self._sessions.values() if info.get("user_email")})
+            users = sorted(
+                {
+                    user_email
+                    for info in self._sessions.values()
+                    if isinstance(user_email := info.get("user_email"), str) and user_email
+                }
+            )
             return {
                 "total_sessions": len(self._sessions),
                 "users": users,
