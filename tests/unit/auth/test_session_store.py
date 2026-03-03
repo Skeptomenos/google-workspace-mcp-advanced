@@ -154,6 +154,17 @@ class TestOAuth21SessionStore:
         assert info["issuer"] == sample_session_data["issuer"]
         assert info["scopes"] == sample_session_data["scopes"]
 
+    def test_store_and_retrieve_session_with_client_key(self, store, sample_session_data):
+        """Client-aware sessions are retrievable via (client, user) and MCP mapping."""
+        data = sample_session_data.copy()
+        data["oauth_client_key"] = "work"
+        store.store_session(**data)
+
+        credentials = store.get_credentials(data["user_email"], oauth_client_key="work")
+        assert credentials is not None
+        assert credentials.token == data["access_token"]
+        assert store.get_client_by_mcp_session(data["mcp_session_id"]) == "work"
+
 
 class TestOAuth21SessionStoreOAuthStates:
     """Tests for OAuth state management."""
@@ -225,6 +236,22 @@ class TestOAuth21SessionStoreOAuthStates:
         with pytest.raises(ValueError, match="Invalid or expired"):
             store.validate_oauth_state(state)
 
+    def test_oauth_state_persists_client_metadata(self, store):
+        """OAuth state metadata should include client and expected user fields."""
+        state = "state_with_client"
+        store.store_oauth_state(
+            state=state,
+            session_id="mcp_session_123",
+            oauth_client_key="work",
+            expected_user_email="user@hellofresh.com",
+            redirect_uri="http://localhost:9876/oauth2callback",
+        )
+
+        result = store.validate_oauth_state(state, session_id="mcp_session_123")
+        assert result["oauth_client_key"] == "work"
+        assert result["expected_user_email"] == "user@hellofresh.com"
+        assert result["redirect_uri"] == "http://localhost:9876/oauth2callback"
+
 
 class TestOAuth21SessionStoreDeviceFlowPersistence:
     """Tests for pending device flow persistence and cleanup."""
@@ -239,6 +266,7 @@ class TestOAuth21SessionStoreDeviceFlowPersistence:
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
         store.store_pending_device_flow(
             user_email="user@example.com",
+            oauth_client_key=None,
             device_code="device-code-123",
             user_code="ABCD-EFGH",
             verification_url="https://www.google.com/device",
@@ -261,6 +289,7 @@ class TestOAuth21SessionStoreDeviceFlowPersistence:
         expired = datetime.now(timezone.utc) - timedelta(seconds=10)
         store.store_pending_device_flow(
             user_email="expired@example.com",
+            oauth_client_key=None,
             device_code="expired-device-code",
             user_code="WXYZ-1234",
             verification_url="https://www.google.com/device",

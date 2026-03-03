@@ -5,9 +5,9 @@ Detailed implementation scope and issue-level tracking live in:
 `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/PLAN.md`
 
 ## Metadata
-- Last Updated (UTC): 2026-03-03T00:30:00Z
+- Last Updated (UTC): 2026-03-03T09:26:47Z
 - Active Branch: `main`
-- Overall Status: Rename/migration hardening `DIST-05` is complete and verified; `AUTH-01` remains the only in-progress track and is now narrowed to MCP-host post-release smoke evidence (`WS-06.6`) after `WS-06.5` uvx release verification passed. Canonical execution plan: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/AUTH_STABILIZATION_PLAN.md`.
+- Overall Status: Rename/migration hardening `DIST-05` is complete and verified. Authentication stabilization is now closed: `AUTH-01` and `AUTH-02` are done with OpenCode runtime evidence (OP-74/OP-76 PASS, persisted credentials for both tenants). Canonical execution plan: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/AUTH_STABILIZATION_PLAN.md`.
 - Implementation Readiness: `YES`
 
 ## Baseline Verification Snapshot
@@ -17,7 +17,7 @@ Detailed implementation scope and issue-level tracking live in:
 | `uv run ruff check .` | Pass | No lint violations |
 | `uv run ruff format --check .` | Pass | `151` files unchanged |
 | `uv run pyright --project pyrightconfig.json` | Pass | Blocking source-scoped type gate is green (0 errors) |
-| `uv run pytest` | Pass | 633 passed, 3 skipped |
+| `uv run pytest` | Pass | 648 passed, 3 skipped |
 | `uv run python scripts/check_dry_run_defaults.py` | Pass | Dry-run default static guard is green |
 | `uv run python scripts/check_tool_decorators.py` | Pass | Decorator-order static guard is green |
 | `uv run python scripts/check_distribution_scope.py` | Pass | Canonical npm package references are guarded (`google-workspace-mcp-advanced`) |
@@ -36,12 +36,12 @@ Detailed implementation scope and issue-level tracking live in:
 | Wave 6 | Distribution validation and rollout | Done | uvx stable/pinned validation is complete (`DT-01`..`DT-03`, `DT-08`) |
 
 ## Current Focus
-1. Execute manual MCP-hosted auth validation (`WORKSPACE_MCP_AUTH_FLOW=auto`) in OpenCode/Claude Code.
-2. Capture post-release smoke evidence and close `WS-06.6`.
-3. Close `AUTH-01` and sync all living trackers.
+1. Prepare release notes/version bump for auth stabilization + single-MCP multi-client rollout.
+2. Optionally harden `complete_google_auth` user messaging for already-consumed callback state.
+3. Run post-release pinned-package smoke and archive evidence.
 
 ## Open Blockers
-1. `AUTH-01` must be completed before next production rollout.
+1. None for auth track closure.
 
 ## Update Rules
 1. Update this file at the end of each implementation session.

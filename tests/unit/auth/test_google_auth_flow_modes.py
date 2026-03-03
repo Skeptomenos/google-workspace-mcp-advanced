@@ -17,6 +17,7 @@ from auth.google_auth import (
     get_authenticated_google_service,
     initiate_auth_challenge,
 )
+from auth.oauth_clients import OAuthClientSelection
 from core.errors import GoogleAuthenticationError
 
 
@@ -30,6 +31,12 @@ def _valid_credentials() -> Credentials:
         scopes=["https://www.googleapis.com/auth/drive"],
         expiry=datetime.utcnow() + timedelta(hours=1),
     )
+
+
+def _tool_callable(tool_obj):
+    tool_fn = getattr(tool_obj, "fn", None) or getattr(tool_obj, "func", None) or getattr(tool_obj, "_fn", None)
+    assert callable(tool_fn), "Could not resolve callable tool function"
+    return tool_fn
 
 
 def test_effective_auth_flow_mode_auto_prefers_device_for_stdio(monkeypatch):
@@ -58,8 +65,9 @@ def test_effective_auth_flow_mode_honors_explicit_setting(monkeypatch):
 
 def test_start_or_resume_device_auth_reuses_pending_flow(monkeypatch):
     class _Store:
-        def get_pending_device_flow(self, user_email: str):
+        def get_pending_device_flow(self, user_email: str, oauth_client_key: str | None = None):
             assert user_email == "user@example.com"
+            assert oauth_client_key == "legacy-env"
             return {
                 "user_code": "ABCD-EFGH",
                 "verification_url": "https://www.google.com/device",
@@ -68,6 +76,20 @@ def test_start_or_resume_device_auth_reuses_pending_flow(monkeypatch):
             }
 
     monkeypatch.setattr("auth.google_auth.get_oauth21_session_store", lambda: _Store())
+    monkeypatch.setattr(
+        "auth.google_auth._resolve_client_id_and_secret",
+        lambda _user: (
+            OAuthClientSelection(
+                client_key="legacy-env",
+                client_id="legacy-client-id",
+                client_secret="legacy-client-secret",
+                source="legacy_env",
+                selection_mode="legacy",
+            ),
+            "legacy-client-id",
+            "legacy-client-secret",
+        ),
+    )
 
     message = _start_or_resume_device_auth_flow(
         user_google_email="user@example.com",
@@ -132,6 +154,88 @@ async def test_initiate_auth_challenge_device_raises_on_poll_error(monkeypatch):
             required_scopes=["scope1"],
             session_id="mcp-session",
         )
+
+
+@pytest.mark.asyncio
+async def test_initiate_auth_challenge_device_invalid_client_falls_back_to_callback_in_auto_mode(monkeypatch):
+    start_auth_flow_mock = AsyncMock(return_value="callback-auth-link")
+
+    monkeypatch.setattr("auth.google_auth._get_auth_flow_mode", lambda: AUTH_FLOW_AUTO)
+    monkeypatch.setattr("auth.google_auth._get_effective_auth_flow_mode", lambda: AUTH_FLOW_DEVICE)
+    monkeypatch.setattr("auth.google_auth._poll_pending_device_auth_flow", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(
+        "auth.google_auth._start_or_resume_device_auth_flow",
+        lambda **_: (_ for _ in ()).throw(
+            GoogleAuthenticationError("Failed to start device authorization flow: invalid_client: Invalid client type")
+        ),
+    )
+    monkeypatch.setattr(
+        "auth.google_auth.resolve_oauth_redirect_uri_for_auth_flow",
+        lambda: "http://localhost:9876/oauth2callback",
+    )
+    monkeypatch.setattr("auth.google_auth.start_auth_flow", start_auth_flow_mock)
+
+    resolved_credentials, message = await initiate_auth_challenge(
+        user_google_email="user@example.com",
+        service_name="Google Drive",
+        required_scopes=["scope1"],
+        session_id="mcp-session",
+    )
+
+    assert resolved_credentials is None
+    assert "Automatically falling back to callback flow" in message
+    assert "callback-auth-link" in message
+    start_auth_flow_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_initiate_auth_challenge_device_invalid_client_raises_in_explicit_device_mode(monkeypatch):
+    monkeypatch.setattr("auth.google_auth._get_auth_flow_mode", lambda: AUTH_FLOW_DEVICE)
+    monkeypatch.setattr("auth.google_auth._get_effective_auth_flow_mode", lambda: AUTH_FLOW_DEVICE)
+    monkeypatch.setattr("auth.google_auth._poll_pending_device_auth_flow", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(
+        "auth.google_auth._start_or_resume_device_auth_flow",
+        lambda **_: (_ for _ in ()).throw(
+            GoogleAuthenticationError("Failed to start device authorization flow: invalid_client: Invalid client type")
+        ),
+    )
+
+    with pytest.raises(GoogleAuthenticationError, match="invalid_client"):
+        await initiate_auth_challenge(
+            user_google_email="user@example.com",
+            service_name="Google Drive",
+            required_scopes=["scope1"],
+            session_id="mcp-session",
+        )
+
+
+@pytest.mark.asyncio
+async def test_initiate_auth_challenge_poll_invalid_client_falls_back_to_callback_in_auto_mode(monkeypatch):
+    start_auth_flow_mock = AsyncMock(return_value="callback-auth-link")
+
+    monkeypatch.setattr("auth.google_auth._get_auth_flow_mode", lambda: AUTH_FLOW_AUTO)
+    monkeypatch.setattr("auth.google_auth._get_effective_auth_flow_mode", lambda: AUTH_FLOW_DEVICE)
+    monkeypatch.setattr(
+        "auth.google_auth._poll_pending_device_auth_flow",
+        AsyncMock(return_value=(None, "error:invalid_client:Invalid client type for device flow")),
+    )
+    monkeypatch.setattr(
+        "auth.google_auth.resolve_oauth_redirect_uri_for_auth_flow",
+        lambda: "http://localhost:9876/oauth2callback",
+    )
+    monkeypatch.setattr("auth.google_auth.start_auth_flow", start_auth_flow_mock)
+
+    resolved_credentials, message = await initiate_auth_challenge(
+        user_google_email="user@example.com",
+        service_name="Google Drive",
+        required_scopes=["scope1"],
+        session_id="mcp-session",
+    )
+
+    assert resolved_credentials is None
+    assert "Automatically falling back to callback flow" in message
+    assert "callback-auth-link" in message
+    start_auth_flow_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -203,3 +307,101 @@ async def test_get_authenticated_google_service_auto_path_delegates_to_shared_ch
         )
 
     challenge_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_complete_google_auth_prefers_callback_url(monkeypatch):
+    import core.server as core_server
+
+    callback_mock = AsyncMock(return_value=("user@example.com", object()))
+    monkeypatch.setattr(core_server, "get_current_scopes", lambda: {"scope.a"})
+    monkeypatch.setattr(core_server, "handle_auth_callback", callback_mock)
+    monkeypatch.setattr(
+        core_server,
+        "get_oauth_redirect_uri_for_current_mode",
+        lambda: "http://localhost:9876/oauth2callback",
+    )
+
+    complete_google_auth = _tool_callable(core_server.complete_google_auth)
+    callback_url = "http://localhost:9876/oauth2callback?code=abc&state=xyz"
+    result = await complete_google_auth(
+        service_name="Google Drive",
+        user_google_email="user@example.com",
+        callback_url=callback_url,
+    )
+
+    assert "Authentication completed successfully" in result
+    assert "user@example.com" in result
+    assert callback_mock.await_args.kwargs["authorization_response"] == callback_url
+
+
+@pytest.mark.asyncio
+async def test_complete_google_auth_supports_code_state_fallback(monkeypatch):
+    import core.server as core_server
+
+    callback_mock = AsyncMock(return_value=("user@example.com", object()))
+    monkeypatch.setattr(core_server, "get_current_scopes", lambda: {"scope.a"})
+    monkeypatch.setattr(core_server, "handle_auth_callback", callback_mock)
+    monkeypatch.setattr(
+        core_server,
+        "get_oauth_redirect_uri_for_current_mode",
+        lambda: "http://localhost:9876/oauth2callback",
+    )
+
+    complete_google_auth = _tool_callable(core_server.complete_google_auth)
+    result = await complete_google_auth(
+        service_name="Google Drive",
+        user_google_email="user@example.com",
+        authorization_code="4/abc",
+        state="state-1",
+    )
+
+    assert "Authentication completed successfully" in result
+    auth_response = callback_mock.await_args.kwargs["authorization_response"]
+    assert "code=4%2Fabc" in auth_response
+    assert "state=state-1" in auth_response
+
+
+@pytest.mark.asyncio
+async def test_setup_google_auth_clients_reports_created(monkeypatch):
+    import core.server as core_server
+
+    monkeypatch.setattr(core_server, "ensure_auth_clients_config", lambda: ({"selection_mode": "mapped_only"}, True))
+    monkeypatch.setattr(
+        core_server,
+        "get_auth_clients_config_path",
+        lambda: "/tmp/auth_clients.json",
+    )
+
+    setup_google_auth_clients = _tool_callable(core_server.setup_google_auth_clients)
+    result = await setup_google_auth_clients()
+
+    assert "created" in result
+    assert "/tmp/auth_clients.json" in result
+
+
+@pytest.mark.asyncio
+async def test_import_google_auth_client_reports_success(monkeypatch):
+    import core.server as core_server
+
+    monkeypatch.setattr(
+        core_server,
+        "import_oauth_client_config",
+        lambda **_: {
+            "client_key": "work",
+            "mapped_accounts": ["user@hellofresh.com"],
+            "mapped_domains": ["hellofresh.com"],
+            "config_path": "/tmp/auth_clients.json",
+        },
+    )
+
+    import_google_auth_client = _tool_callable(core_server.import_google_auth_client)
+    result = await import_google_auth_client(
+        client_key="work",
+        oauth_client_json_path="/tmp/work-client.json",
+        mapped_accounts=["user@hellofresh.com"],
+        mapped_domains=["hellofresh.com"],
+    )
+
+    assert "Imported OAuth client 'work'" in result
+    assert "/tmp/auth_clients.json" in result

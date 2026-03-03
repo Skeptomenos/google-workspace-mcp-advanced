@@ -5,6 +5,7 @@ Audience: Contributors and maintainers.
 ## Roadmap and Execution
 - [PLAN](/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/PLAN.md)
 - [AUTH_STABILIZATION_PLAN](/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/AUTH_STABILIZATION_PLAN.md)
+- [AUTHENTICATION_GOGCLI_REVIEW](/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/AUTHENTICATION_GOGCLI_REVIEW.md)
 - [TASKS](/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/TASKS.md)
 - [STATUS](/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/STATUS.md)
 - [DRY_RUN_MATRIX](/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/DRY_RUN_MATRIX.md)

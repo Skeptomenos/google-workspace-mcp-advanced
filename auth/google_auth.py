@@ -29,6 +29,7 @@ from auth.config import (
 )
 from auth.credential_store import get_credential_store
 from auth.oauth21_session_store import get_oauth21_session_store
+from auth.oauth_clients import OAuthClientSelection, ensure_auth_clients_config, resolve_oauth_client_for_user
 from auth.scopes import SCOPES, get_current_scopes  # noqa
 from core.errors import AuthenticationError, GoogleAuthenticationError
 
@@ -151,15 +152,90 @@ def _get_effective_auth_flow_mode() -> str:
     return AUTH_FLOW_DEVICE if transport_mode == "stdio" else AUTH_FLOW_CALLBACK
 
 
-def _resolve_client_id_and_secret() -> tuple[str, str | None]:
-    """Resolve OAuth client credentials for callback/device flows."""
+def _is_device_flow_invalid_client_error(details: str) -> bool:
+    """Return True when Google rejects device flow for OAuth client type."""
+    normalized = details.lower()
+    return ("invalid_client" in normalized and "device" in normalized) or "invalid client type" in normalized
+
+
+async def _start_callback_auth_challenge(
+    user_google_email: str,
+    service_name: str,
+    required_scopes: list[str],
+    fallback_reason: str | None = None,
+) -> tuple[None, str]:
+    """Start callback flow and optionally prefix a fallback explanation."""
+    oauth_redirect_uri = resolve_oauth_redirect_uri_for_auth_flow()
+    auth_message = await start_auth_flow(
+        user_google_email=user_google_email,
+        service_name=service_name,
+        redirect_uri=oauth_redirect_uri,
+    )
+
+    if fallback_reason:
+        fallback_header = (
+            "Device authorization is not supported by the configured OAuth client for this environment. "
+            f"Automatically falling back to callback flow. Details: {fallback_reason}"
+        )
+        return None, f"{fallback_header}\n\n{auth_message}"
+
+    return None, auth_message
+
+
+def _resolve_oauth_client_selection(
+    user_google_email: str | None,
+    override_client_key: str | None = None,
+) -> OAuthClientSelection:
+    """Resolve OAuth client selection for account/domain-aware auth routing."""
+    if user_google_email:
+        return resolve_oauth_client_for_user(user_google_email, override_client_key=override_client_key)
+
+    # Backward-compatible fallback for callsites without user context.
     config = load_client_secrets_from_env() or {}
     client_cfg = config.get("web") or config.get("installed") or {}
     client_id = client_cfg.get("client_id")
     client_secret = client_cfg.get("client_secret")
     if not client_id:
         raise AuthenticationError("OAuth client ID is missing. Set GOOGLE_OAUTH_CLIENT_ID.")
-    return client_id, client_secret
+    return OAuthClientSelection(
+        client_key="legacy-env",
+        client_id=client_id,
+        client_secret=client_secret,
+        source="legacy_env",
+        selection_mode="legacy",
+    )
+
+
+def _resolve_client_id_and_secret(
+    user_google_email: str | None,
+    override_client_key: str | None = None,
+) -> tuple[OAuthClientSelection, str, str | None]:
+    """Resolve OAuth client selection and credentials for callback/device flows."""
+    oauth_client = _resolve_oauth_client_selection(user_google_email, override_client_key=override_client_key)
+    return oauth_client, oauth_client.client_id, oauth_client.client_secret
+
+
+def _store_get_credential_for_client(
+    credential_store: Any,
+    user_google_email: str,
+    oauth_client_key: str | None,
+) -> Credentials | None:
+    """Compat wrapper for client-scoped credential retrieval."""
+    if oauth_client_key and hasattr(credential_store, "get_credential_for_client"):
+        return credential_store.get_credential_for_client(oauth_client_key, user_google_email)
+    return credential_store.get_credential(user_google_email)
+
+
+def _store_put_credential_for_client(
+    credential_store: Any,
+    user_google_email: str,
+    credentials: Credentials,
+    oauth_client_key: str | None,
+) -> bool:
+    """Compat wrapper for client-scoped credential persistence."""
+    if oauth_client_key and hasattr(credential_store, "store_credential_for_client"):
+        return credential_store.store_credential_for_client(oauth_client_key, user_google_email, credentials)
+    return credential_store.store_credential(user_google_email, credentials)
 
 
 def resolve_oauth_redirect_uri_for_auth_flow() -> str:
@@ -234,8 +310,10 @@ def _start_or_resume_device_auth_flow(
     """
     Create or reuse a pending device flow for a user and return user instructions.
     """
+    oauth_client, client_id, client_secret = _resolve_client_id_and_secret(user_google_email)
+
     store = get_oauth21_session_store()
-    pending = store.get_pending_device_flow(user_google_email)
+    pending = store.get_pending_device_flow(user_google_email, oauth_client_key=oauth_client.client_key)
 
     if pending and status_hint in {None, "authorization_pending", "slow_down"}:
         expires_at = pending.get("expires_at")
@@ -252,7 +330,6 @@ def _start_or_resume_device_auth_flow(
             status_hint=status_hint,
         )
 
-    client_id, client_secret = _resolve_client_id_and_secret()
     scope_string = " ".join(sorted(set(required_scopes)))
     payload = {
         "client_id": client_id,
@@ -285,6 +362,7 @@ def _start_or_resume_device_auth_flow(
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
     store.store_pending_device_flow(
         user_email=user_google_email,
+        oauth_client_key=oauth_client.client_key,
         device_code=device_code,
         user_code=user_code,
         verification_url=verification_url,
@@ -317,17 +395,18 @@ async def _poll_pending_device_auth_flow(
         - credentials is set when token exchange succeeds
         - status_hint indicates pending/slow_down/expired_token/access_denied/error
     """
+    oauth_client, client_id, client_secret = _resolve_client_id_and_secret(user_google_email)
+
     store = get_oauth21_session_store()
-    pending = store.get_pending_device_flow(user_google_email)
+    pending = store.get_pending_device_flow(user_google_email, oauth_client_key=oauth_client.client_key)
     if not pending:
         return None, None
 
     device_code = pending.get("device_code")
     if not device_code:
-        store.clear_pending_device_flow(user_google_email)
+        store.clear_pending_device_flow(user_google_email, oauth_client_key=oauth_client.client_key)
         return None, "error:missing_device_code"
 
-    client_id, client_secret = _resolve_client_id_and_secret()
     payload = {
         "client_id": client_id,
         "device_code": device_code,
@@ -365,17 +444,23 @@ async def _poll_pending_device_auth_flow(
             resolved_email = user_info["email"]
 
         if resolved_email.lower() != user_google_email.lower():
-            store.clear_pending_device_flow(user_google_email)
+            store.clear_pending_device_flow(user_google_email, oauth_client_key=oauth_client.client_key)
             raise GoogleAuthenticationError(
                 f"Device auth completed for '{resolved_email}', but MCP requested '{user_google_email}'. "
                 "Please retry using the intended account."
             )
 
         credential_store = get_credential_store()
-        credential_store.store_credential(resolved_email, credentials)
+        _store_put_credential_for_client(
+            credential_store,
+            resolved_email,
+            credentials,
+            oauth_client_key=oauth_client.client_key,
+        )
 
         store.store_session(
             user_email=resolved_email,
+            oauth_client_key=oauth_client.client_key,
             access_token=access_token,
             refresh_token=refresh_token,
             token_uri=DEFAULT_TOKEN_URI,
@@ -386,7 +471,7 @@ async def _poll_pending_device_auth_flow(
             mcp_session_id=session_id,
             issuer="https://accounts.google.com",
         )
-        store.clear_pending_device_flow(user_google_email)
+        store.clear_pending_device_flow(user_google_email, oauth_client_key=oauth_client.client_key)
         return credentials, None
 
     status_hint = "error:unknown"
@@ -398,7 +483,7 @@ async def _poll_pending_device_auth_flow(
             status_hint = error_code
         elif error_code in {"expired_token", "access_denied"}:
             status_hint = error_code
-            store.clear_pending_device_flow(user_google_email)
+            store.clear_pending_device_flow(user_google_email, oauth_client_key=oauth_client.client_key)
         else:
             status_hint = f"error:{error_code}:{error_description}"
     except ValueError:
@@ -421,6 +506,7 @@ async def initiate_auth_challenge(
         - credentials: set when auth is already complete (e.g., device flow finalized)
         - message: actionable instructions when user interaction is required
     """
+    requested_auth_mode = _get_auth_flow_mode()
     effective_auth_mode = _get_effective_auth_flow_mode()
 
     if effective_auth_mode == AUTH_FLOW_DEVICE:
@@ -433,26 +519,54 @@ async def initiate_auth_challenge(
             return credentials, f"Authentication completed successfully for '{user_google_email}'."
 
         if device_status and device_status.startswith("error:"):
+            if requested_auth_mode == AUTH_FLOW_AUTO and _is_device_flow_invalid_client_error(device_status):
+                logger.warning(
+                    "Device auth failed with invalid_client in auto mode; falling back to callback flow. "
+                    "user=%s service=%s details=%s",
+                    user_google_email,
+                    service_name,
+                    device_status,
+                )
+                return await _start_callback_auth_challenge(
+                    user_google_email=user_google_email,
+                    service_name=service_name,
+                    required_scopes=required_scopes,
+                    fallback_reason=device_status,
+                )
             raise GoogleAuthenticationError(
                 "Device authorization polling failed. "
                 f"Details: {device_status}. Try running the command again to restart auth."
             )
 
-        challenge_message = _start_or_resume_device_auth_flow(
-            user_google_email=user_google_email,
-            service_name=service_name,
-            required_scopes=required_scopes,
-            status_hint=device_status,
-        )
-        return None, challenge_message
+        try:
+            challenge_message = _start_or_resume_device_auth_flow(
+                user_google_email=user_google_email,
+                service_name=service_name,
+                required_scopes=required_scopes,
+                status_hint=device_status,
+            )
+            return None, challenge_message
+        except GoogleAuthenticationError as exc:
+            if requested_auth_mode == AUTH_FLOW_AUTO and _is_device_flow_invalid_client_error(str(exc)):
+                logger.warning(
+                    "Device auth initiation failed with invalid_client in auto mode; "
+                    "falling back to callback flow. user=%s service=%s",
+                    user_google_email,
+                    service_name,
+                )
+                return await _start_callback_auth_challenge(
+                    user_google_email=user_google_email,
+                    service_name=service_name,
+                    required_scopes=required_scopes,
+                    fallback_reason=str(exc),
+                )
+            raise
 
-    oauth_redirect_uri = resolve_oauth_redirect_uri_for_auth_flow()
-    auth_message = await start_auth_flow(
+    return await _start_callback_auth_challenge(
         user_google_email=user_google_email,
         service_name=service_name,
-        redirect_uri=oauth_redirect_uri,
+        required_scopes=required_scopes,
     )
-    return None, auth_message
 
 
 def _find_any_credentials(
@@ -501,12 +615,18 @@ def save_credentials_to_session(session_id: str, credentials: Credentials):
 
     if user_email:
         store = get_oauth21_session_store()
+        oauth_client_key: str | None = None
+        try:
+            oauth_client_key = _resolve_oauth_client_selection(user_email).client_key
+        except Exception:
+            oauth_client_key = None
         token = credentials.token
         if not token:
             logger.warning("Could not save credentials to session store - missing access token")
             return
         store.store_session(
             user_email=user_email,
+            oauth_client_key=oauth_client_key,
             access_token=token,
             refresh_token=credentials.refresh_token,
             token_uri=_token_uri_or_default(credentials),
@@ -630,18 +750,50 @@ def check_client_secrets() -> str | None:
     Returns:
         An error message string if secrets are not found, otherwise None.
     """
-    # With embedded credentials, we always have valid secrets
-    env_config = load_client_secrets_from_env()
-    if env_config:
-        return None
+    try:
+        env_config = load_client_secrets_from_env()
+        if env_config:
+            return None
+    except Exception:
+        # Continue to auth_clients check below.
+        pass
+
+    # Multi-client mode: allow setup via auth_clients.json without global env client credentials.
+    try:
+        auth_clients_config, _ = ensure_auth_clients_config()
+        oauth_clients = auth_clients_config.get("oauth_clients", {})
+        if isinstance(oauth_clients, dict) and oauth_clients:
+            return None
+    except Exception:
+        pass
 
     # This should never happen with embedded credentials
     logger.error("OAuth client credentials not available - this should not happen with embedded credentials")
     return "OAuth client credentials not available. Please contact the project maintainers."
 
 
-def create_oauth_flow(scopes: list[str], redirect_uri: str, state: str | None = None) -> Flow:
+def create_oauth_flow(
+    scopes: list[str],
+    redirect_uri: str,
+    state: str | None = None,
+    oauth_client: OAuthClientSelection | None = None,
+) -> Flow:
     """Creates an OAuth flow using environment variables or client secrets file."""
+    if oauth_client is not None:
+        client_config = {
+            "web": {
+                "client_id": oauth_client.client_id,
+                "client_secret": oauth_client.client_secret,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                "redirect_uris": [redirect_uri],
+            }
+        }
+        flow = Flow.from_client_config(client_config, scopes=scopes, redirect_uri=redirect_uri, state=state)
+        logger.debug("Created OAuth flow from client selection '%s'", oauth_client.client_key)
+        return flow
+
     # Try environment variables first
     env_config = load_client_secrets_from_env()
     if env_config:
@@ -673,6 +825,7 @@ async def start_auth_flow(
     user_google_email: str | None,
     service_name: str,  # e.g., "Google Calendar", "Gmail" for user messages
     redirect_uri: str,  # Added redirect_uri as a required parameter
+    override_client_key: str | None = None,
 ) -> str:
     """
     Initiates the Google OAuth flow and returns an actionable message for the user.
@@ -706,10 +859,16 @@ async def start_auth_flow(
 
         oauth_state = os.urandom(16).hex()
 
+        oauth_client = _resolve_oauth_client_selection(
+            user_google_email,
+            override_client_key=override_client_key,
+        )
+
         flow = create_oauth_flow(
             scopes=get_current_scopes(),  # Use scopes for enabled tools only
             redirect_uri=redirect_uri,  # Use passed redirect_uri
             state=oauth_state,
+            oauth_client=oauth_client,
         )
 
         auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
@@ -721,7 +880,13 @@ async def start_auth_flow(
             logger.debug(f"Could not retrieve FastMCP session ID for state binding: {e}")
 
         store = get_oauth21_session_store()
-        store.store_oauth_state(oauth_state, session_id=session_id)
+        store.store_oauth_state(
+            oauth_state,
+            session_id=session_id,
+            oauth_client_key=oauth_client.client_key,
+            expected_user_email=user_google_email,
+            redirect_uri=redirect_uri,
+        )
 
         logger.info(
             f"Auth flow started for {user_display_name}. State: {oauth_state[:8]}... Advise user to visit: {auth_url}"
@@ -818,13 +983,28 @@ async def handle_auth_callback(
         if not state:
             raise ValueError("OAuth state parameter is missing or invalid")
         state_info = store.validate_oauth_state(state, session_id=session_id)
+        state_oauth_client_key = state_info.get("oauth_client_key")
+        expected_user_email = state_info.get("expected_user_email")
+        redirect_uri_for_flow = state_info.get("redirect_uri") or redirect_uri
         logger.debug(
             "Validated OAuth callback state %s for session %s",
             (state[:8] if state else "<missing>"),
             state_info.get("session_id") or "<unknown>",
         )
 
-        flow = create_oauth_flow(scopes=scopes, redirect_uri=redirect_uri, state=state)
+        oauth_client = None
+        if isinstance(state_oauth_client_key, str) and state_oauth_client_key.strip():
+            oauth_client = _resolve_oauth_client_selection(
+                expected_user_email,
+                override_client_key=state_oauth_client_key,
+            )
+
+        flow = create_oauth_flow(
+            scopes=scopes,
+            redirect_uri=redirect_uri_for_flow,
+            state=state,
+            oauth_client=oauth_client,
+        )
 
         # Exchange the authorization code for credentials
         # Note: fetch_token will use the redirect_uri configured in the flow
@@ -841,11 +1021,22 @@ async def handle_auth_callback(
             raise ValueError("Failed to get user email for identification.")
 
         user_google_email = user_info["email"]
+        if expected_user_email and user_google_email.lower() != str(expected_user_email).lower():
+            raise GoogleAuthenticationError(
+                f"Authentication completed for '{user_google_email}', but expected '{expected_user_email}'. "
+                "Hard-fail policy is active; no cross-client fallback will be attempted."
+            )
         logger.info(f"Identified user_google_email: {user_google_email}")
 
         # Save the credentials
         credential_store = get_credential_store()
-        credential_store.store_credential(user_google_email, credentials)
+        oauth_client_key = oauth_client.client_key if oauth_client else None
+        _store_put_credential_for_client(
+            credential_store,
+            user_google_email,
+            credentials,
+            oauth_client_key=oauth_client_key,
+        )
 
         # Always save to OAuth21SessionStore for centralized management
         store = get_oauth21_session_store()
@@ -854,6 +1045,7 @@ async def handle_auth_callback(
             raise AuthenticationError("OAuth callback did not return an access token")
         store.store_session(
             user_email=user_google_email,
+            oauth_client_key=oauth_client_key,
             access_token=access_token,
             refresh_token=credentials.refresh_token,
             token_uri=_token_uri_or_default(credentials),
@@ -901,6 +1093,15 @@ def get_credentials(
     Returns:
         Valid Credentials object or None.
     """
+    oauth_client_key: str | None = None
+    if user_google_email:
+        try:
+            oauth_client_selection = _resolve_oauth_client_selection(user_google_email)
+            oauth_client_key = oauth_client_selection.client_key
+        except Exception as e:
+            logger.warning("[get_credentials] OAuth client resolution failed for %s: %s", user_google_email, e)
+            return None
+
     # First, try OAuth 2.1 session store if we have a session_id (FastMCP session)
     if session_id:
         try:
@@ -936,6 +1137,7 @@ def get_credentials(
                                 return None
                             store.store_session(
                                 user_email=user_email,
+                                oauth_client_key=store.get_client_by_mcp_session(session_id),
                                 access_token=refreshed_token,
                                 refresh_token=credentials.refresh_token,
                                 scopes=_credential_scopes(credentials),
@@ -962,7 +1164,11 @@ def get_credentials(
 
     # Auto-recovery: If no credentials found via session but session_id exists,
     # check if there's only one user with credentials and auto-bind
-    if session_id and not os.getenv("MCP_SINGLE_USER_MODE"):
+    if (
+        session_id
+        and not os.getenv("MCP_SINGLE_USER_MODE")
+        and (not oauth_client_key or oauth_client_key == "legacy-env")
+    ):
         try:
             store = get_oauth21_session_store()
             cred_store = get_credential_store()
@@ -1083,7 +1289,11 @@ def get_credentials(
                     f"[get_credentials] No session credentials, trying credential store for user_google_email '{user_google_email}'."
                 )
                 credential_store = get_credential_store()
-                credentials = credential_store.get_credential(user_google_email)
+                credentials = _store_get_credential_for_client(
+                    credential_store,
+                    user_google_email,
+                    oauth_client_key=oauth_client_key,
+                )
                 _log_credential_source("file_store", user_google_email, session_id, bool(credentials), "lookup")
             else:
                 logger.debug(
@@ -1137,7 +1347,12 @@ def get_credentials(
             if user_google_email:  # Always save to credential store if email is known
                 if not is_stateless_mode():
                     credential_store = get_credential_store()
-                    credential_store.store_credential(user_google_email, credentials)
+                    _store_put_credential_for_client(
+                        credential_store,
+                        user_google_email,
+                        credentials,
+                        oauth_client_key=oauth_client_key,
+                    )
                 else:
                     logger.info(f"Skipping credential file save in stateless mode for {user_google_email}")
 
@@ -1149,6 +1364,7 @@ def get_credentials(
                     return None
                 store.store_session(
                     user_email=user_google_email,
+                    oauth_client_key=oauth_client_key,
                     access_token=refreshed_token,
                     refresh_token=credentials.refresh_token,
                     token_uri=_token_uri_or_default(credentials),

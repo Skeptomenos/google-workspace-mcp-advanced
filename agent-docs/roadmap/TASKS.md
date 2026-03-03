@@ -8,7 +8,7 @@ Status dashboard: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-
 Dry-run tracker: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/DRY_RUN_MATRIX.md`
 
 ## Metadata
-- Last Updated (UTC): 2026-03-03T00:30:00Z
+- Last Updated (UTC): 2026-03-03T09:26:47Z
 - Active Branch: `main`
 - Owner: Codex
 
@@ -25,7 +25,8 @@ Dry-run tracker: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-m
 
 | ID | Wave | Status | Next Action |
 |---|---|---|---|
-| AUTH-01 | Hotfix | In Progress | WS-01, WS-04, and WS-06.5 are closed; complete post-release MCP-host smoke evidence (`WS-06.6`) and close the track |
+| AUTH-01 | Hotfix | Done | Completed: WS-06.6 closed with OP-74/OP-76 runtime evidence in OpenCode |
+| AUTH-02 | Hotfix | Done | Completed: single-MCP multi-client runtime routing + persistence validation closed |
 | SEC-01 | 1 | Done | Completed: default-deny unverified JWT identity, break-glass env override, and guardrail tests |
 | RUN-01 | 1 | Done | Completed: import path fixed and CI startup smoke added |
 | SEC-02 | 1 | Done | Completed: centralized secure atomic persistence + permission enforcement + tests |
@@ -65,7 +66,25 @@ Dry-run tracker: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-m
 - [x] Complete WS-03 state handling and error clarity tasks
 - [x] Complete WS-04 credential read/refresh confidence tasks
 - [x] Complete WS-05 device flow fallback tasks
-- [ ] Complete WS-06 verification and release tasks
+- [x] Implement AUTH-R2 mitigation: `auto` mode device `invalid_client` auto-falls back to callback flow (explicit `device` mode still hard-fails)
+- [x] Verify AUTH-R2 fallback behavior in live runtime probe (`auto+stdio`, enterprise lane)
+- [x] Complete WS-06 verification and release tasks
+
+## Hotfix Tasks (AUTH-02)
+
+- [x] WS-07.1 Define and approve multi-client config schema (`auth_clients.json`, `selection_mode=mapped_only`)
+- [x] WS-07.2 Implement setup bootstrap (auto-create skeleton when config missing)
+- [x] WS-07.3 Implement explicit OAuth client import flow for secrets
+- [x] WS-07.4 Implement deterministic resolver with hard-fail/no-fallback policy and internal/admin-only override path
+- [x] WS-07.5 Make auth challenges client-aware across flow modes
+- [x] WS-07.6 Partition credential storage by `(client,user)` with migration
+- [x] WS-07.7 Extend session/state bindings to include client dimension
+- [x] WS-07.8 Add manual callback completion path (`start_google_auth` + `complete_google_auth`) with hybrid input (`callback_url` primary, optional `code/state` fallback)
+- [x] WS-07.9 Add integration/runtime tests for routing/isolation/migration
+- [x] WS-07.10 Update operator/user docs for one-MCP multi-client setup
+- [x] Runtime setup/import/routing + hard-fail mismatch probes
+- [x] Replace deleted/invalid private OAuth client and re-import mapped config
+- [x] Complete two-tenant runtime callback completion matrix (OP-74 + OP-76)
 
 ## Wave 1 Tasks (Security + Runtime)
 

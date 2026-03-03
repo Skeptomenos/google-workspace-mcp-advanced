@@ -169,6 +169,33 @@ class TestLocalDirectoryCredentialStore:
         assert retrieved.token == "test_token"
         assert retrieved.expiry is None
 
+    def test_store_and_retrieve_client_scoped_credentials(self, store, sample_credentials):
+        """Client-scoped credential API isolates credentials by client key."""
+        user_email = "scoped@example.com"
+
+        result = store.store_credential_for_client("work", user_email, sample_credentials)
+        assert result is True
+
+        scoped = store.get_credential_for_client("work", user_email)
+        assert scoped is not None
+        assert scoped.token == sample_credentials.token
+
+        missing_other_client = store.get_credential_for_client("private", user_email)
+        assert missing_other_client is None
+
+    def test_client_scoped_lookup_migrates_legacy_flat_credentials(self, store, sample_credentials):
+        """Client-scoped lookup should read-through migrate legacy flat per-email credentials."""
+        user_email = "migrate@example.com"
+        assert store.store_credential(user_email, sample_credentials) is True
+
+        scoped = store.get_credential_for_client("work", user_email)
+        assert scoped is not None
+        assert scoped.token == sample_credentials.token
+
+        migrated = store.get_credential_for_client("work", user_email)
+        assert migrated is not None
+        assert migrated.token == sample_credentials.token
+
     @pytest.mark.skipif(os.name == "nt", reason="POSIX file mode semantics are not guaranteed on Windows")
     def test_stored_credential_file_has_secure_permissions(self, store, sample_credentials):
         """Credential files should be written with restrictive permissions."""

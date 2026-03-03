@@ -63,13 +63,29 @@ class LocalDirectoryCredentialStore(CredentialStore):
         self.base_dir: str = base_dir
         logger.info(f"LocalJsonCredentialStore initialized with base_dir: {base_dir}")
 
-    def _get_credential_path(self, user_email: str) -> str:
+    @staticmethod
+    def _normalize_client_key(client_key: str | None) -> str | None:
+        if client_key is None:
+            return None
+        normalized = str(client_key).strip().lower()
+        if not normalized:
+            return None
+        return normalized.replace("/", "_").replace("\\", "_")
+
+    def _get_client_credentials_dir(self, client_key: str | None) -> str:
+        normalized_client_key = self._normalize_client_key(client_key)
+        if not normalized_client_key:
+            return self.base_dir
+        return os.path.join(self.base_dir, normalized_client_key)
+
+    def _get_credential_path(self, user_email: str, client_key: str | None = None) -> str:
         """Get the file path for a user's credentials."""
-        dir_existed = os.path.exists(self.base_dir)
-        ensure_secure_directory(self.base_dir)
+        target_dir = self._get_client_credentials_dir(client_key)
+        dir_existed = os.path.exists(target_dir)
+        ensure_secure_directory(target_dir)
         if not dir_existed:
-            logger.info(f"Created credentials directory: {self.base_dir}")
-        return os.path.join(self.base_dir, f"{user_email}.json")
+            logger.info(f"Created credentials directory: {target_dir}")
+        return os.path.join(target_dir, f"{user_email}.json")
 
     @staticmethod
     def _load_credentials_from_path(user_email: str, creds_path: str) -> Credentials | None:
@@ -123,6 +139,44 @@ class LocalDirectoryCredentialStore(CredentialStore):
         logger.debug(f"No credential file found for {user_email} at {creds_path}")
         return None
 
+    def get_credential_for_client(self, client_key: str, user_email: str) -> Credentials | None:
+        """Get credentials for a specific OAuth client+user combination."""
+        client_path = self._get_credential_path(user_email, client_key=client_key)
+        if os.path.exists(client_path):
+            return self._load_credentials_from_path(user_email, client_path)
+
+        # Read-through migration fallback from legacy flat per-email storage.
+        legacy_flat_path = self._get_credential_path(user_email, client_key=None)
+        if os.path.exists(legacy_flat_path):
+            credentials = self._load_credentials_from_path(user_email, legacy_flat_path)
+            if credentials:
+                logger.warning(
+                    "Loaded legacy flat credentials for %s while resolving client '%s'. "
+                    "Migrating to client-scoped storage.",
+                    user_email,
+                    client_key,
+                )
+                self.store_credential_for_client(client_key, user_email, credentials)
+                return credentials
+
+        if self.legacy_base_dir:
+            legacy_path = os.path.join(self.legacy_base_dir, f"{user_email}.json")
+            if os.path.exists(legacy_path):
+                logger.warning(
+                    "Loaded credentials from legacy path %s for client '%s'. "
+                    "Migrate to %s or set WORKSPACE_MCP_CONFIG_DIR.",
+                    legacy_path,
+                    client_key,
+                    self.base_dir,
+                )
+                credentials = self._load_credentials_from_path(user_email, legacy_path)
+                if credentials:
+                    self.store_credential_for_client(client_key, user_email, credentials)
+                return credentials
+
+        logger.debug("No credential file found for %s under client '%s'", user_email, client_key)
+        return None
+
     def store_credential(self, user_email: str, credentials: Credentials) -> bool:
         """Store credentials to local JSON file."""
         creds_path = self._get_credential_path(user_email)
@@ -143,6 +197,26 @@ class LocalDirectoryCredentialStore(CredentialStore):
             return True
         except OSError as e:
             logger.error(f"Error storing credentials for {user_email} to {creds_path}: {e}")
+            return False
+
+    def store_credential_for_client(self, client_key: str, user_email: str, credentials: Credentials) -> bool:
+        """Store credentials in client-scoped storage."""
+        creds_path = self._get_credential_path(user_email, client_key=client_key)
+        creds_data = {
+            "token": credentials.token,
+            "refresh_token": credentials.refresh_token,
+            "token_uri": credentials.token_uri,
+            "client_id": credentials.client_id,
+            "client_secret": credentials.client_secret,
+            "scopes": credentials.scopes,
+            "expiry": credentials.expiry.isoformat() if credentials.expiry else None,
+        }
+        try:
+            atomic_write_json(creds_path, creds_data)
+            logger.info("Stored credentials for %s in client '%s' at %s", user_email, client_key, creds_path)
+            return True
+        except OSError as e:
+            logger.error("Error storing client-scoped credentials for %s to %s: %s", user_email, creds_path, e)
             return False
 
     def delete_credential(self, user_email: str) -> bool:
@@ -168,10 +242,27 @@ class LocalDirectoryCredentialStore(CredentialStore):
             logger.error(f"Error deleting credentials for {user_email} from {creds_path}: {e}")
             return False
 
+    def delete_credential_for_client(self, client_key: str, user_email: str) -> bool:
+        """Delete client-scoped credential file for a user."""
+        client_path = self._get_credential_path(user_email, client_key=client_key)
+        try:
+            if os.path.exists(client_path):
+                os.remove(client_path)
+                logger.info("Deleted credentials for %s from client '%s' at %s", user_email, client_key, client_path)
+            return True
+        except OSError as e:
+            logger.error("Error deleting client-scoped credentials for %s from %s: %s", user_email, client_path, e)
+            return False
+
     def list_users(self) -> list[str]:
         """List all users with credential files."""
         users: set[str] = set()
         paths_to_check = [self.base_dir]
+        if os.path.exists(self.base_dir):
+            for item in os.listdir(self.base_dir):
+                potential_client_dir = os.path.join(self.base_dir, item)
+                if os.path.isdir(potential_client_dir):
+                    paths_to_check.append(potential_client_dir)
         if self.legacy_base_dir:
             paths_to_check.append(self.legacy_base_dir)
 
@@ -186,6 +277,21 @@ class LocalDirectoryCredentialStore(CredentialStore):
                 logger.error(f"Error listing credential files in {path}: {e}")
 
         logger.debug(f"Found {len(users)} users across credential directories")
+        return sorted(users)
+
+    def list_users_for_client(self, client_key: str) -> list[str]:
+        """List users for a specific client key."""
+        users: set[str] = set()
+        path = self._get_client_credentials_dir(client_key)
+        if not os.path.exists(path):
+            return []
+
+        try:
+            for filename in os.listdir(path):
+                if filename.endswith(".json"):
+                    users.add(filename[:-5])
+        except OSError as e:
+            logger.error("Error listing client credential files in %s: %s", path, e)
         return sorted(users)
 
 

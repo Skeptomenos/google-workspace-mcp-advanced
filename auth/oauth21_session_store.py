@@ -227,6 +227,7 @@ class OAuth21SessionStore:
     def __init__(self):
         self._sessions: dict[str, dict[str, Any]] = {}
         self._mcp_session_mapping: dict[str, str] = {}  # Maps FastMCP session ID -> user email
+        self._mcp_session_client_mapping: dict[str, str] = {}  # Maps FastMCP session ID -> oauth client key
         self._session_auth_binding: dict[str, str] = {}  # Maps session ID -> authenticated user email (immutable)
         self._oauth_states: dict[str, dict[str, Any]] = {}
         self._pending_device_flows: dict[str, dict[str, Any]] = {}
@@ -255,6 +256,20 @@ class OAuth21SessionStore:
                 "Removed expired OAuth state: %s",
                 state[:8] if len(state) > 8 else state,
             )
+
+    @staticmethod
+    def _session_user_key(user_email: str, oauth_client_key: str | None = None) -> str:
+        """Build in-memory session key with optional client dimension."""
+        if oauth_client_key:
+            return f"{oauth_client_key}::{user_email}"
+        return user_email
+
+    @staticmethod
+    def _pending_device_flow_key(user_email: str, oauth_client_key: str | None = None) -> str:
+        """Build pending device flow key with optional client dimension."""
+        if oauth_client_key:
+            return f"{oauth_client_key}::{user_email}"
+        return user_email
 
     def _cleanup_expired_device_flows_locked(self):
         """Remove expired pending device flows. Caller must hold lock."""
@@ -326,6 +341,9 @@ class OAuth21SessionStore:
             for state, data in self._oauth_states.items():
                 serializable_data[state] = {
                     "session_id": data.get("session_id"),
+                    "oauth_client_key": data.get("oauth_client_key"),
+                    "expected_user_email": data.get("expected_user_email"),
+                    "redirect_uri": data.get("redirect_uri"),
                     "expires_at": data["expires_at"].isoformat() if data.get("expires_at") else None,
                     "created_at": data["created_at"].isoformat() if data.get("created_at") else None,
                 }
@@ -359,6 +377,7 @@ class OAuth21SessionStore:
                 return
 
             self._mcp_session_mapping = data.get("mcp_session_mapping", {})
+            self._mcp_session_client_mapping = data.get("mcp_session_client_mapping", {})
             self._session_auth_binding = data.get("session_auth_binding", {})
 
             # NOTE: We intentionally do NOT populate self._sessions from disk.
@@ -399,6 +418,7 @@ class OAuth21SessionStore:
             # Credentials are stored separately in the credential store.
             data = {
                 "mcp_session_mapping": self._mcp_session_mapping,
+                "mcp_session_client_mapping": self._mcp_session_client_mapping,
                 "session_auth_binding": self._session_auth_binding,
             }
 
@@ -472,6 +492,9 @@ class OAuth21SessionStore:
         self,
         state: str,
         session_id: str | None = None,
+        oauth_client_key: str | None = None,
+        expected_user_email: str | None = None,
+        redirect_uri: str | None = None,
         expires_in_seconds: int = 600,
     ) -> None:
         """Persist an OAuth state value for later validation.
@@ -489,6 +512,9 @@ class OAuth21SessionStore:
             expiry = now + timedelta(seconds=expires_in_seconds)
             self._oauth_states[state] = {
                 "session_id": session_id,
+                "oauth_client_key": oauth_client_key,
+                "expected_user_email": expected_user_email,
+                "redirect_uri": redirect_uri,
                 "expires_at": expiry,
                 "created_at": now,
             }
@@ -598,6 +624,7 @@ class OAuth21SessionStore:
     def store_pending_device_flow(
         self,
         user_email: str,
+        oauth_client_key: str | None,
         device_code: str,
         user_code: str,
         verification_url: str,
@@ -611,45 +638,51 @@ class OAuth21SessionStore:
         if not device_code:
             raise ValueError("device_code must be provided")
 
+        flow_key = self._pending_device_flow_key(user_email, oauth_client_key)
         with self._lock:
             self._cleanup_expired_device_flows_locked()
-            self._pending_device_flows[user_email] = {
+            self._pending_device_flows[flow_key] = {
                 "device_code": device_code,
                 "user_code": user_code,
                 "verification_url": verification_url,
                 "verification_url_complete": verification_url_complete,
                 "interval": interval,
+                "oauth_client_key": oauth_client_key,
+                "user_email": user_email,
                 "created_at": datetime.now(timezone.utc),
                 "expires_at": expires_at,
             }
             self._save_device_flows_to_disk()
 
-    def get_pending_device_flow(self, user_email: str) -> dict[str, Any] | None:
+    def get_pending_device_flow(self, user_email: str, oauth_client_key: str | None = None) -> dict[str, Any] | None:
         """Get pending OAuth device flow metadata for a user."""
         if not user_email:
             return None
 
+        flow_key = self._pending_device_flow_key(user_email, oauth_client_key)
         with self._lock:
             self._cleanup_expired_device_flows_locked()
-            flow_data = self._pending_device_flows.get(user_email)
+            flow_data = self._pending_device_flows.get(flow_key)
             if not flow_data:
                 return None
             return dict(flow_data)
 
-    def clear_pending_device_flow(self, user_email: str) -> None:
+    def clear_pending_device_flow(self, user_email: str, oauth_client_key: str | None = None) -> None:
         """Clear pending OAuth device flow metadata for a user."""
         if not user_email:
             return
 
+        flow_key = self._pending_device_flow_key(user_email, oauth_client_key)
         with self._lock:
-            if user_email in self._pending_device_flows:
-                del self._pending_device_flows[user_email]
+            if flow_key in self._pending_device_flows:
+                del self._pending_device_flows[flow_key]
                 self._save_device_flows_to_disk()
 
     def store_session(
         self,
         user_email: str,
         access_token: str,
+        oauth_client_key: str | None = None,
         refresh_token: str | None = None,
         token_uri: str = "https://oauth2.googleapis.com/token",
         client_id: str | None = None,
@@ -666,6 +699,7 @@ class OAuth21SessionStore:
         Args:
             user_email: User's email address
             access_token: OAuth 2.1 access token
+            oauth_client_key: OAuth client identifier for multi-client routing
             refresh_token: OAuth 2.1 refresh token
             token_uri: Token endpoint URI
             client_id: OAuth client ID
@@ -678,7 +712,10 @@ class OAuth21SessionStore:
         """
         with self._lock:
             normalized_expiry = _normalize_expiry_to_naive_utc(expiry)
+            session_user_key = self._session_user_key(user_email, oauth_client_key)
             session_info = {
+                "user_email": user_email,
+                "oauth_client_key": oauth_client_key,
                 "access_token": access_token,
                 "refresh_token": refresh_token,
                 "token_uri": token_uri,
@@ -691,7 +728,7 @@ class OAuth21SessionStore:
                 "issuer": issuer,
             }
 
-            self._sessions[user_email] = session_info
+            self._sessions[session_user_key] = session_info
 
             # Store MCP session mapping if provided
             # Import diagnostics here to avoid circular imports
@@ -724,6 +761,8 @@ class OAuth21SessionStore:
                     raise ValueError(f"Session {mcp_session_id} is already bound to a different user")
 
                 self._mcp_session_mapping[mcp_session_id] = user_email
+                if oauth_client_key:
+                    self._mcp_session_client_mapping[mcp_session_id] = oauth_client_key
                 logger.info(
                     f"Stored OAuth 2.1 session for {user_email} (session_id: {session_id}, mcp_session_id: {mcp_session_id})"
                 )
@@ -737,7 +776,7 @@ class OAuth21SessionStore:
             # Persist session mappings to disk
             self._save_session_mappings_to_disk()
 
-    def get_credentials(self, user_email: str) -> Credentials | None:
+    def get_credentials(self, user_email: str, oauth_client_key: str | None = None) -> Credentials | None:
         """
         Get Google credentials for a user from OAuth 2.1 session.
 
@@ -748,7 +787,15 @@ class OAuth21SessionStore:
             Google Credentials object or None
         """
         with self._lock:
-            session_info = self._sessions.get(user_email)
+            session_info = self._sessions.get(self._session_user_key(user_email, oauth_client_key))
+            if not session_info and oauth_client_key:
+                # Backward compatibility: allow lookup of legacy user-only key.
+                session_info = self._sessions.get(user_email)
+            if not session_info and not oauth_client_key:
+                # If no client key requested, resolve uniquely by user_email if possible.
+                matches = [info for info in self._sessions.values() if info.get("user_email") == user_email]
+                if len(matches) == 1:
+                    session_info = matches[0]
             if not session_info:
                 logger.debug(f"No OAuth 2.1 session found for {user_email}")
                 return None
@@ -793,6 +840,7 @@ class OAuth21SessionStore:
         with self._lock:
             # Look up user email from MCP session mapping
             user_email = self._mcp_session_mapping.get(mcp_session_id)
+            oauth_client_key = self._mcp_session_client_mapping.get(mcp_session_id)
             if not user_email:
                 logger.debug(f"No user mapping found for MCP session {mcp_session_id}")
                 log_credential_lookup(
@@ -804,7 +852,12 @@ class OAuth21SessionStore:
                 )
                 return None
 
-            logger.debug(f"Found user {user_email} for MCP session {mcp_session_id}")
+            logger.debug(
+                "Found user %s for MCP session %s (client=%s)",
+                user_email,
+                mcp_session_id,
+                oauth_client_key or "legacy",
+            )
             log_session_binding(
                 mcp_session_id=mcp_session_id,
                 user_email=user_email,
@@ -814,7 +867,7 @@ class OAuth21SessionStore:
             )
 
             # First try in-memory session
-            credentials = self.get_credentials(user_email)
+            credentials = self.get_credentials(user_email, oauth_client_key=oauth_client_key)
             if credentials:
                 log_credential_lookup(
                     source="memory_session",
@@ -837,7 +890,10 @@ class OAuth21SessionStore:
             from auth.credential_store import get_credential_store
 
             cred_store = get_credential_store()
-            credentials = cred_store.get_credential(user_email)
+            if oauth_client_key and hasattr(cred_store, "get_credential_for_client"):
+                credentials = cred_store.get_credential_for_client(oauth_client_key, user_email)  # type: ignore[attr-defined]
+            else:
+                credentials = cred_store.get_credential(user_email)
             if credentials:
                 logger.info(
                     f"Recovered credentials for {user_email} from credential store (MCP session {mcp_session_id})"
@@ -856,7 +912,9 @@ class OAuth21SessionStore:
                     success=True,
                 )
                 # Re-populate the in-memory session for future requests
-                self._sessions[user_email] = {
+                self._sessions[self._session_user_key(user_email, oauth_client_key)] = {
+                    "user_email": user_email,
+                    "oauth_client_key": oauth_client_key,
                     "access_token": credentials.token,
                     "refresh_token": credentials.refresh_token,
                     "token_uri": credentials.token_uri,
@@ -882,6 +940,7 @@ class OAuth21SessionStore:
     def get_credentials_with_validation(
         self,
         requested_user_email: str,
+        oauth_client_key: str | None = None,
         session_id: str | None = None,
         auth_token_email: str | None = None,
         allow_recent_auth: bool = False,
@@ -910,7 +969,7 @@ class OAuth21SessionStore:
                     )
                     return None
                 # Token email matches, allow access
-                return self.get_credentials(requested_user_email)
+                return self.get_credentials(requested_user_email, oauth_client_key=oauth_client_key)
 
             # Priority 2: Check session binding
             if session_id:
@@ -923,7 +982,7 @@ class OAuth21SessionStore:
                         )
                         return None
                     # Session binding matches, allow access
-                    return self.get_credentials(requested_user_email)
+                    return self.get_credentials(requested_user_email, oauth_client_key=oauth_client_key)
 
                 # Check if this is an MCP session
                 mcp_user = self._mcp_session_mapping.get(session_id)
@@ -935,11 +994,18 @@ class OAuth21SessionStore:
                         )
                         return None
                     # MCP session matches, allow access
-                    return self.get_credentials(requested_user_email)
+                    return self.get_credentials(requested_user_email, oauth_client_key=oauth_client_key)
 
             # Special case: Allow access if user has recently authenticated (for clients that don't send tokens)
             # CRITICAL SECURITY: This is ONLY allowed in stdio mode, NEVER in OAuth 2.1 mode
-            if allow_recent_auth and requested_user_email in self._sessions:
+            requested_session_key = self._session_user_key(requested_user_email, oauth_client_key)
+            recent_auth_available = requested_session_key in self._sessions
+            if allow_recent_auth and not recent_auth_available and not oauth_client_key:
+                recent_auth_available = any(
+                    info.get("user_email") == requested_user_email for info in self._sessions.values()
+                )
+
+            if allow_recent_auth and recent_auth_available:
                 # Check transport mode to ensure this is only used in stdio
                 try:
                     from auth.config import get_transport_mode
@@ -959,7 +1025,7 @@ class OAuth21SessionStore:
                     f"Allowing credential access for {requested_user_email} based on recent authentication "
                     f"(stdio mode only - client not sending bearer token)"
                 )
-                return self.get_credentials(requested_user_email)
+                return self.get_credentials(requested_user_email, oauth_client_key=oauth_client_key)
 
             # No session or token info available - deny access for security
             logger.warning(f"Credential access denied for {requested_user_email}: No valid session or token")
@@ -978,7 +1044,12 @@ class OAuth21SessionStore:
         with self._lock:
             return self._mcp_session_mapping.get(mcp_session_id)
 
-    def get_session_info(self, user_email: str) -> dict[str, Any] | None:
+    def get_client_by_mcp_session(self, mcp_session_id: str) -> str | None:
+        """Get OAuth client key by FastMCP session ID."""
+        with self._lock:
+            return self._mcp_session_client_mapping.get(mcp_session_id)
+
+    def get_session_info(self, user_email: str, oauth_client_key: str | None = None) -> dict[str, Any] | None:
         """
         Get complete session information including issuer.
 
@@ -989,26 +1060,33 @@ class OAuth21SessionStore:
             Session information dictionary or None
         """
         with self._lock:
-            return self._sessions.get(user_email)
+            return self._sessions.get(self._session_user_key(user_email, oauth_client_key))
 
-    def remove_session(self, user_email: str):
+    def remove_session(self, user_email: str, oauth_client_key: str | None = None):
         """Remove session for a user."""
         with self._lock:
             removed_something = False
 
             # Get session IDs from in-memory session if available
-            session_info = self._sessions.get(user_email, {})
+            session_info = self._sessions.get(self._session_user_key(user_email, oauth_client_key), {})
             mcp_session_id = session_info.get("mcp_session_id")
             session_id = session_info.get("session_id")
 
             # Remove from in-memory sessions
-            if user_email in self._sessions:
+            session_user_key = self._session_user_key(user_email, oauth_client_key)
+            if session_user_key in self._sessions:
+                del self._sessions[session_user_key]
+                removed_something = True
+            elif user_email in self._sessions:
+                # Legacy key cleanup.
                 del self._sessions[user_email]
                 removed_something = True
 
             # Remove from MCP mapping - check both by session ID and by scanning for email
             if mcp_session_id and mcp_session_id in self._mcp_session_mapping:
                 del self._mcp_session_mapping[mcp_session_id]
+                if mcp_session_id in self._mcp_session_client_mapping:
+                    del self._mcp_session_client_mapping[mcp_session_id]
                 if mcp_session_id in self._session_auth_binding:
                     del self._session_auth_binding[mcp_session_id]
                 removed_something = True
@@ -1018,6 +1096,8 @@ class OAuth21SessionStore:
                 sessions_to_remove = [sid for sid, email in self._mcp_session_mapping.items() if email == user_email]
                 for sid in sessions_to_remove:
                     del self._mcp_session_mapping[sid]
+                    if sid in self._mcp_session_client_mapping:
+                        del self._mcp_session_client_mapping[sid]
                     if sid in self._session_auth_binding:
                         del self._session_auth_binding[sid]
                     removed_something = True
@@ -1041,9 +1121,14 @@ class OAuth21SessionStore:
             else:
                 logger.debug(f"No session found to remove for {user_email}")
 
-    def has_session(self, user_email: str) -> bool:
+    def has_session(self, user_email: str, oauth_client_key: str | None = None) -> bool:
         """Check if a user has an active session."""
         with self._lock:
+            session_user_key = self._session_user_key(user_email, oauth_client_key)
+            if session_user_key in self._sessions:
+                return True
+            if oauth_client_key:
+                return False
             return user_email in self._sessions
 
     def has_mcp_session(self, mcp_session_id: str) -> bool:
@@ -1055,15 +1140,17 @@ class OAuth21SessionStore:
         """Return the sole authenticated user email when exactly one session exists."""
         with self._lock:
             if len(self._sessions) == 1:
-                return next(iter(self._sessions))
+                only_session = next(iter(self._sessions.values()))
+                return only_session.get("user_email")
             return None
 
     def get_stats(self) -> dict[str, Any]:
         """Get store statistics."""
         with self._lock:
+            users = sorted({info.get("user_email") for info in self._sessions.values() if info.get("user_email")})
             return {
                 "total_sessions": len(self._sessions),
-                "users": list(self._sessions.keys()),
+                "users": users,
                 "mcp_session_mappings": len(self._mcp_session_mapping),
                 "mcp_sessions": list(self._mcp_session_mapping.keys()),
             }
@@ -1213,10 +1300,18 @@ def ensure_session_from_access_token(
 
     if email:
         try:
+            oauth_client_key = None
+            try:
+                from auth.oauth_clients import resolve_oauth_client_for_user
+
+                oauth_client_key = resolve_oauth_client_for_user(email).client_key
+            except Exception:
+                oauth_client_key = None
             store = get_oauth21_session_store()
             token_uri = getattr(credentials, "token_uri", None) or "https://oauth2.googleapis.com/token"
             store.store_session(
                 user_email=email,
+                oauth_client_key=oauth_client_key,
                 access_token=credentials.token,
                 refresh_token=credentials.refresh_token,
                 token_uri=token_uri,
@@ -1250,7 +1345,14 @@ def get_credentials_from_token(access_token: str, user_email: str | None = None)
 
         # If we have user_email, try to get credentials from store
         if user_email:
-            credentials = store.get_credentials(user_email)
+            oauth_client_key = None
+            try:
+                from auth.oauth_clients import resolve_oauth_client_for_user
+
+                oauth_client_key = resolve_oauth_client_for_user(user_email).client_key
+            except Exception:
+                oauth_client_key = None
+            credentials = store.get_credentials(user_email, oauth_client_key=oauth_client_key)
             if credentials and credentials.token == access_token:
                 logger.debug(f"Found matching credentials from store for {user_email}")
                 return credentials

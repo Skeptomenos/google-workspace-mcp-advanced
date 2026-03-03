@@ -13,6 +13,7 @@ from google.oauth2.credentials import Credentials
 from auth.credential_store import LocalDirectoryCredentialStore
 from auth.google_auth import get_credentials
 from auth.oauth21_session_store import OAuth21SessionStore
+from auth.oauth_clients import OAuthClientSelection
 
 
 class TestCredentialPersistence:
@@ -190,6 +191,16 @@ class TestTokenRefresh:
         monkeypatch.setattr(Credentials, "refresh", _fake_refresh, raising=False)
         monkeypatch.setattr("auth.google_auth.get_credential_store", lambda: store)
         monkeypatch.setattr("auth.google_auth.get_oauth21_session_store", lambda: _SessionStore())
+        monkeypatch.setattr(
+            "auth.google_auth.resolve_oauth_client_for_user",
+            lambda _user_google_email, override_client_key=None: OAuthClientSelection(
+                client_key="test-client",
+                client_id="test_id",
+                client_secret="test_secret",
+                source="test",
+                selection_mode="mapped_only",
+            ),
+        )
 
         resolved = get_credentials(
             user_google_email=user_email,

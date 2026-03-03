@@ -2,11 +2,11 @@
 
 ## Living Document Controls
 1. Status: `IN_IMPLEMENTATION`
-2. Last Updated (UTC): `2026-03-03T00:30:00Z`
+2. Last Updated (UTC): `2026-03-03T09:26:47Z`
 3. Canonical Path: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/PLAN.md`
 4. Active Branch: `main`
 5. Local Task Board: `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/TASKS.md`
-6. Overall Progress: `82.6%` (`19/23` issues `Done`; `1/23` `In Progress`; `3/23` `Not Started`)
+6. Overall Progress: `87.5%` (`21/24` issues `Done`; `0/24` `In Progress`; `3/24` `Not Started`)
 7. Update Cadence:
    1. update this file after every completed issue ID (`SEC-*`, `SAFE-*`, `DIST-*`, etc.),
    2. update this file at the end of each implementation session,
@@ -18,6 +18,31 @@
 1. Authentication stabilization is now tracked in a dedicated living plan:
    `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/roadmap/AUTH_STABILIZATION_PLAN.md`
 2. Issue ID for this track: `AUTH-01` (P0, in progress).
+3. Single-MCP multi-client tenant support is tracked as `AUTH-02` (P0, in progress).
+
+## Enterprise/Private Single-MCP Multi-Client Authentication (Primary Strategy)
+1. Status: `IN_DESIGN_TO_IMPLEMENTATION_HANDOFF`
+2. Priority: `P0` (required for enterprise + private coexistence in one MCP entry)
+3. Objective:
+   1. keep one MCP server config in OpenCode/Claude Code,
+   2. allow account/domain-specific OAuth client routing inside that one MCP process,
+   3. isolate credentials and sessions by `(oauth_client, user_email)`.
+4. Strategy baseline:
+   1. adopt `gogcli`-style client registry + deterministic selection precedence,
+   2. introduce client-aware credential/session persistence,
+   3. add manual callback completion path (`start` + `complete`) for MCP-hosted lifecycles.
+5. Setup contract (selected):
+   1. if `auth_clients.json` is missing, MCP auto-creates a skeleton and returns actionable setup instructions,
+   2. OAuth client secrets are added via explicit setup/import flow (not authored free-text by LLM),
+   3. selection mode is `mapped_only` with hard-fail mismatch behavior and no fallback to other clients,
+   4. explicit client override is internal/admin-only (not exposed on normal user tool calls),
+   5. `complete_google_auth` uses hybrid input with `callback_url` as primary and optional `code/state` fallback.
+6. Reference analysis:
+   1. `/Users/david.helmus/repos/ai-dev/_infra/gws-mcp-advanced/gws-mcp-advanced/agent-docs/AUTHENTICATION_GOGCLI_REVIEW.md`
+
+### Temporary Fallback (Not Target End-State)
+1. Dual-MCP-entry tenant split remains a contingency workaround for immediate operations.
+2. It is explicitly not the target architecture and should be retired after `AUTH-02` closes.
 
 ## Implementation Readiness Verdict
 1. Verdict: `YES`, preflight is complete and implementation is active.
@@ -45,7 +70,8 @@
 
 | ID | Status | Owner | Branch | PR | Test Evidence | Last Update |
 |---|---|---|---|---|---|---|
-| AUTH-01 | In Progress | Codex | main | - | WS-01, WS-04, and WS-06.5 are now closed (`uvx` installability verified for `1.0.1`); remaining closure gate is `WS-06.6` (post-release MCP-host smoke evidence). | 2026-03-03 |
+| AUTH-01 | Done | Codex | main | - | WS-06.6 is now closed in OpenCode host: OP-74/OP-76 PASS with persistence proof. AUTH-R2 fallback is validated end-to-end in runtime. | 2026-03-03 |
+| AUTH-02 | Done | Codex | main | - | WS-07 runtime closeout complete: one MCP entry routed private+enterprise tenants to distinct OAuth clients, mismatch hard-fail verified, and protected tool retries succeeded without re-auth prompts. | 2026-03-03 |
 | SEC-01 | Done | Codex | codex/run-01-fastmcp-import-smoke | - | Middleware now rejects unverified JWT identity by default; `WORKSPACE_MCP_ALLOW_UNVERIFIED_JWT=true` break-glass override; guardrail tests added | 2026-02-27 |
 | RUN-01 | Done | Codex | codex/run-01-fastmcp-import-smoke | - | `uv run python -c "import main"` + `uv run python -c "import fastmcp_server"`; CI startup smoke job added | 2026-02-27 |
 | SEC-02 | Done | Codex | codex/run-01-fastmcp-import-smoke | - | Shared secure atomic JSON writer added; credential and session persistence wired to strict permissions; security I/O tests added | 2026-02-27 |
@@ -75,13 +101,15 @@ This plan follows the Codex ExecPlan model and is scoped to **actionable current
 The plan is **decision-complete** for:
 1. dry-run rollout across mutating tools (inventory + contract + migration waves),
 2. runtime/security hardening,
-3. canonical distribution path via PyPI + `uvx` with explicit scope alignment.
+3. canonical distribution path via PyPI + `uvx` with explicit scope alignment,
+4. single-MCP multi-client authentication direction for enterprise/private coexistence.
 
 The plan resolves:
 1. Security and runtime blockers.
 2. Safety and quality gate gaps.
 3. Open roadmap/spec items.
 4. The core gap: enabling autonomous, repeatable MCP verification (not just unit tests).
+5. The architecture gap: one-MCP multi-tenant OAuth client routing and credential isolation.
 
 ## Goals
 1. Eliminate current critical security/runtime risks.
@@ -89,6 +117,7 @@ The plan resolves:
 3. Close open roadmap items (Markdown/docs feature stream).
 4. Give the agent a deterministic way to test MCP protocol + live feature behavior end-to-end.
 5. Normalize planning docs into one canonical status source.
+6. Deliver one-MCP multi-client authentication that supports enterprise and private tenants without dual MCP configs.
 
 ## Non-Goals
 1. Re-opening archived historical work that is already closed and non-impacting.
@@ -109,6 +138,7 @@ The plan resolves:
 
 | ID | Severity | Issue | Mitigation Strategy | Primary Files |
 |---|---|---|---|---|
+| AUTH-02 | P0 | One MCP process cannot route auth by tenant/account to different OAuth clients | Add named OAuth-client registry + account/domain mapping + client-aware credential/session storage + manual completion tool + compatibility migration; enforce `mapped_only` + hard-fail/no-fallback domain/client policy | `auth/config.py`, `auth/google_auth.py`, `auth/credential_types/store.py`, `auth/oauth21_session_store.py`, `core/server.py`, new `specs/AUTH_MULTI_CLIENT_SINGLE_MCP_SPEC.md` |
 | SEC-01 | P0 | Auth trust boundary (unverified JWT identity path) | Allow identity only from verified token/provider paths; reject unsigned JWT identity claims by default; add break-glass env flag off by default | `auth/middleware/auth_info.py`, `auth/oauth21_session_store.py`, `auth/service_decorator.py`, `core/server.py` |
 | RUN-01 | P1 | Cloud entrypoint import regression | Replace stale import and add import smoke tests in CI | `fastmcp_server.py`, `.github/workflows/ci.yml` |
 | SEC-02 | P1 | Credential files written without strict permission guarantees | Centralize atomic secure JSON write with strict file/dir modes and apply to credential/session persistence | `auth/credential_types/store.py`, `auth/oauth21_session_store.py`, new `auth/security_io.py` |
@@ -531,13 +561,13 @@ The plan resolves:
 | 2026-02-28 | Keep OpenCode live lifecycle smoke opt-in (`OPENCODE_SMOKE_LIVE=1`) | Preserve deterministic local validation of prompt execution/teardown without forcing model/provider credentials in default test runs | OPC-01, QUAL-02 |
 
 ## Session Handoff (Living)
-1. Current Focus: `Close AUTH-01 with MCP-host post-release smoke evidence (WS-06.6)`
+1. Current Focus: `Auth release readiness and rollout documentation`
 2. Next 3 Actions:
-   1. run MCP-host manual smoke in OpenCode/Claude Code (`WORKSPACE_MCP_AUTH_FLOW=auto`),
-   2. capture smoke evidence and close `WS-06.6`,
-   3. close `AUTH-01` and sync plan/status/task docs.
+   1. prepare release notes/version bump for auth stabilization + single-MCP multi-client rollout,
+   2. optionally improve `complete_google_auth` messaging when callback server already consumed OAuth state,
+   3. run post-release smoke on pinned package version and archive evidence.
 3. Active Blockers:
-   1. `AUTH-01` remains open pending manual MCP-host smoke evidence (`WS-06.6`).
+   1. None for auth track closure.
 
 ## Execution Changelog (Living)
 1. 2026-02-27: Promoted `PLAN.md` to canonical living execution doc; added readiness verdict, wave schedule, issue tracker, update protocol, evidence log, decision log, and session handoff.
@@ -620,3 +650,7 @@ The plan resolves:
 78. 2026-03-02: Closed `DIST-05` by completing canonical runtime/config naming cleanup (including `core/utils.py`, sync-map defaults, auth store fallback migration), publishing `docs/setup/MIGRATING_FROM_GWS_MCP_ADVANCED.md`, cleaning active docs/tests naming drift, and re-running full verification (`628 passed`, `3 skipped`).
 79. 2026-03-03: Advanced `AUTH-01` by closing WS-01.5 and WS-04.1/WS-04.2/WS-04.3 with new parity/env-path/refresh/diagnostics coverage and logging improvements in `auth/google_auth.py`; targeted auth suite and full verification are green (`633 passed`, `3 skipped`), leaving only WS-06.5/WS-06.6 external validation gates.
 80. 2026-03-03: Closed `WS-06.5` by validating published runtime installability using `uvx --from google-workspace-mcp-advanced==1.0.1 google-workspace-mcp-advanced --help`; `AUTH-01` is now blocked only by manual MCP-host smoke evidence (`WS-06.6`).
+81. 2026-03-03: Advanced auth runtime closeout by executing live probes against `~/.config/google-workspace-mcp-advanced`: `setup_google_auth_clients` and dual-client import are complete, AUTH-R2 fallback is verified live (`auto+stdio` invalid_client -> callback), mismatch hard-fail policy is verified, and a new external blocker was identified (`AUTH-R9`: private OAuth client is deleted in GCP), which blocks OP-74/OP-76 completion until client replacement.
+82. 2026-03-03: Resolved `AUTH-R9` by re-importing `private` mapping with valid local MCP client credentials (`684416...`), then re-ran runtime probes to confirm both tenant lanes now route to distinct client IDs (`private` -> `684416...`, `enterprise` -> `499833...`) with `auto+stdio` fallback active; remaining closeout is manual callback completion evidence (OP-76).
+83. 2026-03-03: Performed final runtime config sanity check and living-doc sync: `auth_clients.json` now has `selection_mode=mapped_only`, clients `{private, enterprise}`, account/domain mappings for `david@helmus.me` and `david.helmus@hellofresh.com`, and all auth trackers (`PLAN.md`, `STATUS.md`, `TASKS.md`, `AUTH_STABILIZATION_PLAN.md`, `OPENCODE_MCP_MANUAL_TESTING.md`) are aligned to one remaining gate (`OP-74/OP-76` callback completion in OpenCode).
+84. 2026-03-03: Ingested OpenCode runtime matrix closeout: OP-74 PASS (private+enterprise routed in one MCP entry with distinct client behavior) and OP-76 PASS (persistence proven by `list_calendars` success without re-auth prompts: private `8` calendars, enterprise `15` calendars). Auth tracks `AUTH-01` and `AUTH-02` are now closed.

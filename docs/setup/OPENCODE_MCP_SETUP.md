@@ -9,7 +9,7 @@ Use one of these OpenCode config files:
 - Project config: `opencode.json` or `opencode.jsonc`
 - Global config: `~/.config/opencode/opencode.json`
 
-## Add MCP Entry
+## Stable (Published) Configuration
 
 ```json
 {
@@ -19,12 +19,42 @@ Use one of these OpenCode config files:
       "enabled": true,
       "command": [
         "uvx",
-        "google-workspace-mcp-advanced==1.0.1",
+        "google-workspace-mcp-advanced==1.0.2",
         "--transport",
         "stdio"
       ],
+      "timeout": 60000,
       "environment": {
-        "USER_GOOGLE_EMAIL": "your.email@company.com"
+        "USER_GOOGLE_EMAIL": "your.email@company.com",
+        "WORKSPACE_MCP_CONFIG_DIR": "/Users/<you>/.config/google-workspace-mcp-advanced"
+      }
+    }
+  }
+}
+```
+
+## Dev (Local Repository) Configuration
+
+Use this while developing unreleased code.
+
+```json
+{
+  "mcp": {
+    "google-workspace": {
+      "type": "local",
+      "enabled": true,
+      "command": [
+        "uv",
+        "run",
+        "--project",
+        "/absolute/path/to/google-workspace-mcp-advanced",
+        "python",
+        "/absolute/path/to/google-workspace-mcp-advanced/main.py"
+      ],
+      "timeout": 60000,
+      "environment": {
+        "USER_GOOGLE_EMAIL": "your.email@company.com",
+        "WORKSPACE_MCP_CONFIG_DIR": "/Users/<you>/.config/google-workspace-mcp-advanced"
       }
     }
   }
@@ -40,10 +70,18 @@ Use one of these OpenCode config files:
 ## Troubleshooting
 
 - If server is missing, confirm config file path and JSON validity.
+- If OpenCode shows `Invalid input mcp.google-workspace`, remove unsupported fields such as `cwd`, `args`, or legacy `mcpServers` entries.
 - If process launch fails, test the command directly in terminal:
 
 ```bash
-uvx google-workspace-mcp-advanced==1.0.1 --transport stdio
+uvx google-workspace-mcp-advanced==1.0.2 --transport stdio
+```
+
+For local dev mode:
+
+```bash
+uv run --project /absolute/path/to/google-workspace-mcp-advanced \
+  python /absolute/path/to/google-workspace-mcp-advanced/main.py --transport stdio
 ```
 
 ## Official References

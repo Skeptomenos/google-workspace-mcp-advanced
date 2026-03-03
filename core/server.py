@@ -4,6 +4,7 @@ import os
 from collections.abc import Callable
 from importlib import import_module, metadata
 from typing import Any
+from urllib.parse import quote_plus
 
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastmcp import FastMCP
@@ -31,6 +32,7 @@ from auth.google_auth import (
 from auth.middleware.auth_info import AuthInfoMiddleware
 from auth.middleware.session import MCPSessionMiddleware
 from auth.oauth21_session_store import get_oauth21_session_store, set_auth_provider
+from auth.oauth_clients import ensure_auth_clients_config, get_auth_clients_config_path, import_oauth_client_config
 from auth.oauth_responses import (
     create_error_response,
     create_server_error_response,
@@ -537,3 +539,97 @@ async def start_google_auth(service_name: str, user_google_email: str | None = U
     except Exception as e:
         logger.error(f"Failed to start Google authentication flow: {e}", exc_info=True)
         return f"**Error:** An unexpected error occurred: {e}"
+
+
+@server.tool()
+async def complete_google_auth(
+    service_name: str,
+    user_google_email: str,
+    callback_url: str | None = None,
+    authorization_code: str | None = None,
+    state: str | None = None,
+) -> str:
+    """
+    Complete Google OAuth after `start_google_auth`.
+
+    Preferred input is `callback_url` (the full redirected URL copied from the browser).
+    Fallback input supports (`authorization_code`, `state`) when full callback URL is unavailable.
+    """
+    if not user_google_email:
+        raise ValueError("user_google_email must be provided.")
+
+    if callback_url:
+        authorization_response = callback_url
+    elif authorization_code and state:
+        redirect_uri = get_oauth_redirect_uri_for_current_mode()
+        authorization_response = f"{redirect_uri}?code={quote_plus(authorization_code)}&state={quote_plus(state)}"
+    else:
+        return "**Authentication Error:** Provide `callback_url` (preferred) or both `authorization_code` and `state`."
+
+    try:
+        required_scopes = sorted(get_current_scopes())
+        verified_user_id, _ = await handle_auth_callback(
+            scopes=required_scopes,
+            authorization_response=authorization_response,
+            redirect_uri=get_oauth_redirect_uri_for_current_mode(),
+            session_id=None,
+        )
+        return (
+            f"Authentication completed successfully for '{verified_user_id}' via {service_name}. "
+            "Retry your original command."
+        )
+    except Exception as e:
+        logger.error("Failed to complete Google authentication flow: %s", e, exc_info=True)
+        return f"**Authentication Error:** {e}"
+
+
+@server.tool()
+async def setup_google_auth_clients() -> str:
+    """
+    Ensure `auth_clients.json` exists for single-MCP multi-client auth routing.
+    """
+    try:
+        config, created = ensure_auth_clients_config()
+        mode = config.get("selection_mode", "mapped_only")
+        status = "created" if created else "already present"
+        return (
+            f"Auth clients config is {status} at `{get_auth_clients_config_path()}`. "
+            f"selection_mode={mode}. "
+            "Use `import_google_auth_client` to import OAuth JSON files and add mappings."
+        )
+    except Exception as e:
+        logger.error("Failed to setup auth clients config: %s", e, exc_info=True)
+        return f"**Auth Client Setup Error:** {e}"
+
+
+@server.tool()
+async def import_google_auth_client(
+    client_key: str,
+    oauth_client_json_path: str,
+    mapped_accounts: list[str] | None = None,
+    mapped_domains: list[str] | None = None,
+    set_default: bool = False,
+    flow_preference: str = "auto",
+) -> str:
+    """
+    Import a Google OAuth client JSON into `auth_clients.json` and apply account/domain mappings.
+
+    This is an admin/setup tool for enterprise/private multi-client routing.
+    """
+    try:
+        result = import_oauth_client_config(
+            client_key=client_key,
+            oauth_client_json_path=oauth_client_json_path,
+            account_emails=mapped_accounts,
+            domains=mapped_domains,
+            set_default=set_default,
+            flow_preference=flow_preference,
+        )
+        return (
+            f"Imported OAuth client '{result['client_key']}' from `{oauth_client_json_path}`. "
+            f"Mapped accounts: {len(result['mapped_accounts'])}, domains: {len(result['mapped_domains'])}. "
+            f"Config path: `{result['config_path']}`"
+        )
+    except Exception as e:
+        logger.error("Failed to import OAuth client config: %s", e, exc_info=True)
+        return f"**OAuth Client Import Error:** {e}"

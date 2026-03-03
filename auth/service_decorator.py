@@ -16,6 +16,7 @@ from auth.oauth21_session_store import (
     get_auth_provider,
     get_oauth21_session_store,
 )
+from auth.oauth_clients import resolve_oauth_client_for_user
 from auth.scopes import (
     CALENDAR_EVENTS_SCOPE,
     CALENDAR_READONLY_SCOPE,
@@ -249,10 +250,16 @@ async def get_authenticated_google_service_oauth21(
         return service, resolved_email
 
     store = get_oauth21_session_store()
+    oauth_client_key: str | None = None
+    try:
+        oauth_client_key = resolve_oauth_client_for_user(user_google_email).client_key
+    except Exception as e:
+        raise GoogleAuthenticationError(f"OAuth client resolution failed for {user_google_email}: {e}") from e
 
     # Use the validation method to ensure session can only access its own credentials
     credentials = store.get_credentials_with_validation(
         requested_user_email=user_google_email,
+        oauth_client_key=oauth_client_key,
         session_id=session_id,
         auth_token_email=auth_token_email,
         allow_recent_auth=allow_recent_auth,

@@ -12,6 +12,7 @@ import auth.oauth21_session_store as oauth21_session_store_module
 from auth.google_auth import get_credentials
 from auth.middleware.auth_info import AuthInfoMiddleware
 from auth.oauth21_session_store import ensure_session_from_access_token, get_credentials_from_token
+from auth.oauth_clients import OAuthClientSelection
 
 
 class _DummyFastMCPContext:
@@ -155,7 +156,7 @@ def test_get_credentials_from_token_prefers_matching_store_credentials(monkeypat
     )
 
     class _Store:
-        def get_credentials(self, _user_email: str) -> Credentials:
+        def get_credentials(self, _user_email: str, oauth_client_key: str | None = None) -> Credentials:
             return stored_credentials
 
     monkeypatch.setattr(oauth21_session_store_module, "get_oauth21_session_store", lambda: _Store())
@@ -180,7 +181,7 @@ def test_get_credentials_from_token_uses_provider_cache_record(monkeypatch):
     observed: dict[str, object] = {}
 
     class _Store:
-        def get_credentials(self, _user_email: str) -> None:
+        def get_credentials(self, _user_email: str, oauth_client_key: str | None = None) -> None:
             return None
 
     def _fake_ensure_session(record: object, email: str | None, _mcp_session_id: str | None = None) -> Credentials:
@@ -203,7 +204,7 @@ def test_get_credentials_from_token_fallback_builds_minimal_credentials(monkeypa
     """Token bridge should return minimal credentials when neither store nor provider has token metadata."""
 
     class _Store:
-        def get_credentials(self, _user_email: str) -> None:
+        def get_credentials(self, _user_email: str, oauth_client_key: str | None = None) -> None:
             return None
 
     monkeypatch.setattr(oauth21_session_store_module, "get_oauth21_session_store", lambda: _Store())
@@ -240,6 +241,16 @@ def test_get_credentials_logs_credential_source_selection(monkeypatch, caplog):
     caplog.set_level("INFO")
     monkeypatch.setattr("auth.google_auth.is_stateless_mode", lambda: False)
     monkeypatch.setattr("auth.google_auth.get_credential_store", lambda: _Store())
+    monkeypatch.setattr(
+        "auth.google_auth.resolve_oauth_client_for_user",
+        lambda _user_google_email, override_client_key=None: OAuthClientSelection(
+            client_key="test-client",
+            client_id="client-id",
+            client_secret="client-secret",
+            source="test",
+            selection_mode="mapped_only",
+        ),
+    )
 
     credentials = get_credentials(
         user_google_email="diag@example.com",

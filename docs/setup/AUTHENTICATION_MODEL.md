@@ -10,8 +10,10 @@ This document explains how authentication works at runtime, beyond the quick set
 - First protected tool call triggers OAuth if credentials are missing.
 - In `stdio`, default auth interaction is device flow (`WORKSPACE_MCP_AUTH_FLOW=auto`).
 - In `streamable-http`, default auth interaction is callback flow.
+- In `auto` mode, device-flow `invalid_client` falls back to callback flow automatically.
 - Credentials are persisted and reused across restarts.
 - Session binding is used to prevent cross-account credential access.
+- Optional single-MCP multi-client routing supports private + enterprise OAuth client separation.
 - Mutating tools still require explicit `dry_run=False` to execute writes.
 
 ## Runtime Modes
@@ -71,6 +73,10 @@ For most users, this is enough. You do not need to call auth tools manually.
 - Credential files are stored under:
   - `<config_dir>/credentials/`
 - Session/auth state is also persisted so sessions can recover after restart.
+- Multi-client setup additionally persists:
+  - account/domain OAuth client mappings (`auth_clients.json`),
+  - client-bound OAuth states,
+  - client-aware pending device flow state.
 
 Operationally, this means a restart usually does not require re-auth unless token scope or account context changed.
 
@@ -78,14 +84,29 @@ Operationally, this means a restart usually does not require re-auth unless toke
 
 - In normal client use, one MCP session is bound to one Google identity.
 - Session binding is immutable for security (prevents rebinding a live session to a different account).
+- In multi-client mode, session/auth persistence carries OAuth client context to prevent cross-client reuse.
 - If an account mismatch happens, re-authenticate for the intended account/session.
+
+## Single-MCP Multi-Client Routing
+
+When configured, auth client selection uses:
+1. internal/admin override,
+2. account mapping (`account_clients`),
+3. domain mapping (`domain_clients`),
+4. default client only in non-`mapped_only` modes.
+
+`mapped_only` hard-fails if no mapping exists or if domain/client policy mismatches.
+No cross-client fallback is attempted.
+
+Setup guide:
+- [Single-MCP Multi-Client Auth Setup](MULTI_CLIENT_AUTH_SETUP.md)
 
 ## OAuth Configuration Inputs
 
 | Variable | Purpose | Required |
 |---|---|---|
-| `GOOGLE_OAUTH_CLIENT_ID` | OAuth client ID used for Google consent flow | Yes |
-| `GOOGLE_OAUTH_CLIENT_SECRET` | OAuth client secret | Yes |
+| `GOOGLE_OAUTH_CLIENT_ID` | OAuth client ID used for legacy single-client flow | Yes for legacy single-client mode |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | OAuth client secret used for legacy single-client flow | Yes for legacy single-client mode |
 | `USER_GOOGLE_EMAIL` | Preferred target account hint for local client setups | Yes for standard client setup |
 | `WORKSPACE_MCP_CONFIG_DIR` | Custom config/credential directory | No |
 | `WORKSPACE_MCP_AUTH_FLOW` | Auth interaction mode (`auto`, `device`, `callback`) | No |
@@ -130,6 +151,13 @@ Practical recovery sequence:
 - Ensure your client is using the correct MCP server entry.
 - Restart the client so a new MCP subprocess/session is created.
 
+### Multi-client mapping/domain mismatch errors
+
+- Check `auth_clients.json` under your config dir.
+- Verify `account_clients` and `domain_clients` map the requested email/domain to the intended client.
+- Verify client `allowed_domains` includes the account domain.
+- Use `import_google_auth_client` and re-run auth if mappings are incomplete.
+
 ### HTTP mode token/session confusion
 
 - Verify bearer token belongs to the same Google account expected by the request.
@@ -138,6 +166,7 @@ Practical recovery sequence:
 ## Related Docs
 
 - [MCP Client Setup Guide](MCP_CLIENT_SETUP_GUIDE.md)
+- [Single-MCP Multi-Client Auth Setup](MULTI_CLIENT_AUTH_SETUP.md)
 - [Migration Guide](MIGRATING_FROM_GWS_MCP_ADVANCED.md)
 - [Claude Code Setup](CLAUDE_CODE_MCP_SETUP.md)
 - [Cursor Setup](CURSOR_MCP_SETUP.md)

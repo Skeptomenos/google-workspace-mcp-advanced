@@ -34,7 +34,7 @@ uv --version
 uvx google-workspace-mcp-advanced --transport stdio
 
 # Pinned deterministic version (recommended for teams)
-uvx google-workspace-mcp-advanced==1.0.1 --transport stdio
+uvx google-workspace-mcp-advanced==1.0.2 --transport stdio
 ```
 
 ### 3. Add MCP client config
@@ -44,7 +44,7 @@ uvx google-workspace-mcp-advanced==1.0.1 --transport stdio
   "mcpServers": {
     "google-workspace": {
       "command": "uvx",
-      "args": ["google-workspace-mcp-advanced==1.0.1", "--transport", "stdio"],
+      "args": ["google-workspace-mcp-advanced==1.0.2", "--transport", "stdio"],
       "env": {
         "USER_GOOGLE_EMAIL": "your.email@company.com"
       }
@@ -68,9 +68,22 @@ uvx google-workspace-mcp-advanced==1.0.1 --transport stdio
    - open the verification URL,
    - enter the user code,
    - retry your tool call.
+   - if device flow is unsupported for your OAuth client type, the server falls back to callback flow automatically.
 4. In `streamable-http`, complete callback auth by opening the OAuth URL shown by the server.
+   - for MCP-hosted/manual completion workflows, use `complete_google_auth` with the browser callback URL.
 5. Credentials are saved in `~/.config/google-workspace-mcp-advanced/credentials/`.
 6. Legacy directory `~/.config/gws-mcp-advanced/` is still supported for migration.
+
+## Single-MCP Multi-Client Mode
+
+Use one MCP entry with multiple OAuth clients (for example private + enterprise tenants) via:
+
+- `auth_clients.json` under `WORKSPACE_MCP_CONFIG_DIR`
+- setup tools: `setup_google_auth_clients`, `import_google_auth_client`
+- completion tool: `complete_google_auth`
+
+Guide:
+- [Single-MCP Multi-Client Auth Setup](docs/setup/MULTI_CLIENT_AUTH_SETUP.md)
 
 ## Local Development Mode
 
@@ -139,8 +152,8 @@ uv run google-workspace-mcp-advanced --tools gmail drive calendar
 | Variable | Required | Description |
 |---|---|---|
 | `USER_GOOGLE_EMAIL` | Yes | Target Google account email |
-| `GOOGLE_OAUTH_CLIENT_ID` | Yes | OAuth client ID |
-| `GOOGLE_OAUTH_CLIENT_SECRET` | Yes | OAuth client secret |
+| `GOOGLE_OAUTH_CLIENT_ID` | Yes for legacy single-client mode | OAuth client ID |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | Yes for legacy single-client mode | OAuth client secret |
 | `WORKSPACE_MCP_CONFIG_DIR` | No | Config/credential directory override |
 | `WORKSPACE_MCP_AUTH_FLOW` | No | Auth interaction mode: `auto` (default), `device`, or `callback` |
 
@@ -156,6 +169,7 @@ If you previously ran the project as `gws-mcp-advanced`, follow:
 - Client setup hub: [docs/setup/MCP_CLIENT_SETUP_GUIDE.md](docs/setup/MCP_CLIENT_SETUP_GUIDE.md)
 - Migration guide: [docs/setup/MIGRATING_FROM_GWS_MCP_ADVANCED.md](docs/setup/MIGRATING_FROM_GWS_MCP_ADVANCED.md)
 - Authentication model: [docs/setup/AUTHENTICATION_MODEL.md](docs/setup/AUTHENTICATION_MODEL.md)
+- Single-MCP multi-client auth setup: [docs/setup/MULTI_CLIENT_AUTH_SETUP.md](docs/setup/MULTI_CLIENT_AUTH_SETUP.md)
 - Claude Code setup: [docs/setup/CLAUDE_CODE_MCP_SETUP.md](docs/setup/CLAUDE_CODE_MCP_SETUP.md)
 - Cursor setup: [docs/setup/CURSOR_MCP_SETUP.md](docs/setup/CURSOR_MCP_SETUP.md)
 - OpenCode setup: [docs/setup/OPENCODE_MCP_SETUP.md](docs/setup/OPENCODE_MCP_SETUP.md)
