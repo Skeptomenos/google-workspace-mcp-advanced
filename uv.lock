@@ -693,7 +693,7 @@ wheels = [
 
 [[package]]
 name = "google-workspace-mcp-advanced"
-version = "1.0.2"
+version = "1.0.3"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

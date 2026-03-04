@@ -40,7 +40,7 @@ uv --version
 uvx google-workspace-mcp-advanced --transport stdio
 
 # Pinned deterministic version (recommended for teams)
-uvx google-workspace-mcp-advanced==1.0.2 --transport stdio
+uvx google-workspace-mcp-advanced==1.0.3 --transport stdio
 ```
 
 ### 3. Add MCP client config
@@ -50,7 +50,7 @@ uvx google-workspace-mcp-advanced==1.0.2 --transport stdio
   "mcpServers": {
     "google-workspace": {
       "command": "uvx",
-      "args": ["google-workspace-mcp-advanced==1.0.2", "--transport", "stdio"],
+      "args": ["google-workspace-mcp-advanced==1.0.3", "--transport", "stdio"],
       "env": {
         "USER_GOOGLE_EMAIL": "your.email@company.com"
       }
