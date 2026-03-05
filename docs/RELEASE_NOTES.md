@@ -1,5 +1,31 @@
 # Release Notes
 
+## 2026-03-05 - Search OAuth Scope Fix + Release v1.0.5
+
+### Fixed
+- Removed `https://www.googleapis.com/auth/cse` from OAuth scope aggregation.
+- Removed `search` from `TOOL_SCOPES_MAP` so global auth no longer requests Custom Search scope.
+- Removed `customsearch` scope group alias from `auth/service_decorator.py`.
+- Updated Search tool decorators to require no OAuth scopes (`@require_google_service("customsearch", [])`), preserving API-key runtime auth model.
+
+### Added
+- Regression test coverage for scope policy:
+  - `tests/unit/auth/test_search_scope_policy.py`
+  - Asserts `cse` never appears in aggregated OAuth scopes.
+
+### Changed
+- Version bump to `1.0.5` in release artifacts:
+  - `pyproject.toml`
+  - `package.json`
+  - `uv.lock`
+- Updated pinned `uvx` examples in README and setup/distribution docs to `1.0.5`.
+
+### Validation
+- `uv run ruff check .`
+- `uv run ruff format --check .`
+- `uv run pyright --project pyrightconfig.json`
+- `uv run pytest -q`
+
 ## 2026-03-05 - Cadence Workflow User Guide + Release v1.0.4
 
 ### Added
