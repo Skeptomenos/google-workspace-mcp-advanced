@@ -19,7 +19,7 @@ Use one of these OpenCode config files:
       "enabled": true,
       "command": [
         "uvx",
-        "google-workspace-mcp-advanced==1.0.3",
+        "google-workspace-mcp-advanced==1.0.4",
         "--transport",
         "stdio"
       ],
@@ -74,7 +74,7 @@ Use this while developing unreleased code.
 - If process launch fails, test the command directly in terminal:
 
 ```bash
-uvx google-workspace-mcp-advanced==1.0.3 --transport stdio
+uvx google-workspace-mcp-advanced==1.0.4 --transport stdio
 ```
 
 For local dev mode:

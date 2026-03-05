@@ -40,7 +40,7 @@ uv --version
 uvx google-workspace-mcp-advanced --transport stdio
 
 # Pinned deterministic version (recommended for teams)
-uvx google-workspace-mcp-advanced==1.0.3 --transport stdio
+uvx google-workspace-mcp-advanced==1.0.4 --transport stdio
 ```
 
 ### 3. Add MCP client config
@@ -50,7 +50,7 @@ uvx google-workspace-mcp-advanced==1.0.3 --transport stdio
   "mcpServers": {
     "google-workspace": {
       "command": "uvx",
-      "args": ["google-workspace-mcp-advanced==1.0.3", "--transport", "stdio"],
+      "args": ["google-workspace-mcp-advanced==1.0.4", "--transport", "stdio"],
       "env": {
         "USER_GOOGLE_EMAIL": "your.email@company.com"
       }
@@ -185,7 +185,7 @@ If you previously ran the project as `gws-mcp-advanced`, follow:
 - Cursor setup: [docs/setup/CURSOR_MCP_SETUP.md](docs/setup/CURSOR_MCP_SETUP.md)
 - OpenCode setup: [docs/setup/OPENCODE_MCP_SETUP.md](docs/setup/OPENCODE_MCP_SETUP.md)
 - Gemini CLI setup: [docs/setup/GEMINI_CLI_MCP_SETUP.md](docs/setup/GEMINI_CLI_MCP_SETUP.md)
-- Live cadence workflow guide: [docs/setup/LIVE_CADENCE_WORKFLOW.md](docs/setup/LIVE_CADENCE_WORKFLOW.md)
+- Cadence workflow user guide: [docs/setup/LIVE_CADENCE_WORKFLOW.md](docs/setup/LIVE_CADENCE_WORKFLOW.md)
 - Distribution/release guide: [docs/DISTRIBUTION_RELEASE.md](docs/DISTRIBUTION_RELEASE.md)
 - Release notes: [docs/RELEASE_NOTES.md](docs/RELEASE_NOTES.md)
 - Comparison with upstream: [docs/COMPARISON.md](docs/COMPARISON.md)

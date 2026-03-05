@@ -1,5 +1,28 @@
 # Release Notes
 
+## 2026-03-05 - Cadence Workflow User Guide + Release v1.0.4
+
+### Added
+- User-facing cadence workflow documentation:
+  - `docs/setup/LIVE_CADENCE_WORKFLOW.md`
+- Operational runbook details for:
+  - cadence trigger modes,
+  - lane behavior (`mcp_protocol`, `live_mcp`, optional `live_write`),
+  - cleanup safety model and invocation patterns.
+
+### Changed
+- Version bump to `1.0.4` in release artifacts:
+  - `pyproject.toml`
+  - `package.json`
+- Updated pinned `uvx` examples in README and setup/distribution docs to `1.0.4`.
+
+### Validation
+- Local release gates passed before tagging:
+  - `uv run ruff check .`
+  - `uv run ruff format --check .`
+  - `uv run pyright --project pyrightconfig.json`
+  - `uv run pytest -q`
+
 ## 2026-03-03 - Apps Script v1 Rollout (`APPS-01`..`APPS-06`)
 
 ### Added
