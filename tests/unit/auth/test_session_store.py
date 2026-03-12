@@ -252,6 +252,17 @@ class TestOAuth21SessionStoreOAuthStates:
         assert result["expected_user_email"] == "user@hellofresh.com"
         assert result["redirect_uri"] == "http://localhost:9876/oauth2callback"
 
+    def test_oauth_state_persists_code_verifier_metadata(self, store):
+        state = "state_with_pkce"
+        store.store_oauth_state(
+            state=state,
+            session_id="mcp_session_123",
+            code_verifier="verifier-123",
+        )
+
+        result = store.validate_oauth_state(state, session_id="mcp_session_123")
+        assert result["code_verifier"] == "verifier-123"
+
 
 class TestOAuth21SessionStoreDeviceFlowPersistence:
     """Tests for pending device flow persistence and cleanup."""

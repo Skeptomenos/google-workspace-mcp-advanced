@@ -399,6 +399,81 @@ async def test_complete_google_auth_supports_code_state_fallback(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_handle_auth_callback_rehydrates_flow_with_persisted_code_verifier(monkeypatch):
+    from auth.google_auth import handle_auth_callback
+
+    class _Store:
+        def __init__(self):
+            self.consumed_state = None
+            self.stored_session = None
+
+        def validate_oauth_state(self, state, session_id=None):
+            assert state == "state-1"
+            assert session_id is None
+            return {
+                "oauth_client_key": "work",
+                "expected_user_email": "user@example.com",
+                "redirect_uri": "http://localhost:9876/oauth2callback",
+                "code_verifier": "persisted-verifier",
+                "session_id": None,
+            }
+
+        def consume_oauth_state(self, state):
+            self.consumed_state = state
+
+        def store_session(self, **kwargs):
+            self.stored_session = kwargs
+
+    class _Flow:
+        def __init__(self):
+            self.fetch_kwargs = None
+            self.credentials = _valid_credentials()
+
+        def fetch_token(self, **kwargs):
+            self.fetch_kwargs = kwargs
+
+    store = _Store()
+    flow = _Flow()
+    captured = {}
+
+    monkeypatch.setattr("auth.google_auth.get_oauth21_session_store", lambda: store)
+    monkeypatch.setattr(
+        "auth.google_auth._resolve_oauth_client_selection",
+        lambda user_email, override_client_key=None: OAuthClientSelection(
+            client_key=override_client_key or "work",
+            client_id="client-id",
+            client_secret="client-secret",
+            source="test",
+            selection_mode="mapped_only",
+        ),
+    )
+
+    def _create_flow(**kwargs):
+        captured.update(kwargs)
+        return flow
+
+    monkeypatch.setattr("auth.google_auth.create_oauth_flow", _create_flow)
+    monkeypatch.setattr(
+        "auth.google_auth.get_user_info",
+        AsyncMock(return_value={"email": "user@example.com"}),
+    )
+    monkeypatch.setattr("auth.google_auth.is_stateless_mode", lambda: True)
+
+    verified_user, credentials = await handle_auth_callback(
+        scopes=["scope.a"],
+        authorization_response="http://localhost:9876/oauth2callback?code=abc&state=state-1",
+        redirect_uri="http://localhost:9876/oauth2callback",
+        session_id=None,
+    )
+
+    assert verified_user == "user@example.com"
+    assert credentials is flow.credentials
+    assert captured["code_verifier"] == "persisted-verifier"
+    assert flow.fetch_kwargs["authorization_response"].endswith("code=abc&state=state-1")
+    assert store.consumed_state == "state-1"
+
+
+@pytest.mark.asyncio
 async def test_setup_google_auth_clients_reports_created(monkeypatch):
     import core.server as core_server
 
