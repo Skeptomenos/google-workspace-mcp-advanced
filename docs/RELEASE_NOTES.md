@@ -1,5 +1,36 @@
 # Release Notes
 
+## 2026-03-12 - PKCE Callback Verifier Persistence + Release v1.0.6
+
+### Fixed
+- Persisted OAuth callback PKCE `code_verifier` state across auth initiation and callback completion.
+- Rehydrated callback OAuth flows with the original verifier so token exchange no longer sends `code_verifier=None`.
+- Updated the OpenCode serve smoke script to pass HTTP Basic Auth credentials automatically when `OPENCODE_SERVER_PASSWORD` is set in the environment.
+
+### Added
+- Regression coverage for PKCE callback persistence and callback flow rehydration:
+  - `tests/unit/auth/test_google_auth_pkce.py`
+  - `tests/unit/auth/test_google_auth_flow_modes.py`
+  - `tests/unit/auth/test_oauth_state_persistence.py`
+  - `tests/unit/auth/test_session_store.py`
+
+### Changed
+- Pinned `google-auth-oauthlib` to `1.3.0` so local development matches the published runtime's PKCE autogeneration behavior.
+- Version bump to `1.0.6` in release artifacts:
+  - `pyproject.toml`
+  - `package.json`
+  - `uv.lock`
+- Updated pinned `uvx` examples in README and setup/distribution docs to `1.0.6`.
+
+### Validation
+- `uv run python scripts/check_release_version_match.py`
+- `uv run python scripts/check_distribution_scope.py`
+- `uv run pytest -q tests/unit/core/test_distribution_checks.py`
+- `uv run ruff check .`
+- `uv run ruff format --check .`
+- `uv run pyright --project pyrightconfig.json`
+- `uv run pytest -q`
+
 ## 2026-03-05 - Search OAuth Scope Fix + Release v1.0.5
 
 ### Fixed
