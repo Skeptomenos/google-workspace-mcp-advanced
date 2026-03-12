@@ -27,7 +27,7 @@ This allows staged migration without immediate manual file moves.
 
 1. Update MCP command in client config:
    - old: `uvx gws-mcp-advanced --transport stdio`
-   - new: `uvx google-workspace-mcp-advanced==1.0.5 --transport stdio`
+   - new: `uvx google-workspace-mcp-advanced==1.0.6 --transport stdio`
 2. Keep your MCP server key as `google-workspace` (recommended).
 3. Restart your MCP client so it spawns a new subprocess with updated config.
 4. Run a read-only tool (`list_calendars`, `list_drive_items`) to confirm auth loads.

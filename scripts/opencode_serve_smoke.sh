@@ -41,6 +41,11 @@ echo "[opencode-smoke] opencode version:"
 opencode --version
 
 BASE_URL="http://${HOST}:${PORT}"
+CURL_ARGS=(-fsS)
+if [[ -n "${OPENCODE_SERVER_PASSWORD:-}" ]]; then
+  CURL_ARGS+=(--user "${OPENCODE_SERVER_USERNAME:-opencode}:${OPENCODE_SERVER_PASSWORD}")
+fi
+
 echo "[opencode-smoke] starting server at ${BASE_URL}"
 opencode serve --hostname "${HOST}" --port "${PORT}" --print-logs >"${LOG_FILE}" 2>&1 &
 SERVER_PID="$!"
@@ -52,7 +57,7 @@ for _ in $(seq 1 60); do
     exit 1
   fi
 
-  health_json="$(curl -fsS "${BASE_URL}/global/health" 2>/dev/null || true)"
+  health_json="$(curl "${CURL_ARGS[@]}" "${BASE_URL}/global/health" 2>/dev/null || true)"
   if [[ "${health_json}" == *"\"healthy\":true"* ]]; then
     echo "[opencode-smoke] health endpoint reachable: ${health_json}"
     echo "[opencode-smoke] PASS"

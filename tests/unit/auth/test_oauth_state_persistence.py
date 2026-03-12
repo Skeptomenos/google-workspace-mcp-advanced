@@ -59,7 +59,7 @@ class TestOAuthStatePersistence:
 
             # Store a state
             test_state = "test_state_12345"
-            store.store_oauth_state(test_state, session_id="test_session")
+            store.store_oauth_state(test_state, session_id="test_session", code_verifier="verifier-123")
 
             # Verify file was created
             assert os.path.exists(self.states_file)
@@ -70,6 +70,7 @@ class TestOAuthStatePersistence:
 
             assert test_state in data
             assert data[test_state]["session_id"] == "test_session"
+            assert data[test_state]["code_verifier"] == "verifier-123"
             assert "expires_at" in data[test_state]
             assert "created_at" in data[test_state]
 
@@ -84,6 +85,7 @@ class TestOAuthStatePersistence:
         test_data = {
             "persisted_state_abc": {
                 "session_id": "persisted_session",
+                "code_verifier": "persisted-verifier",
                 "expires_at": future_expiry,
                 "created_at": created_at,
             }
@@ -100,6 +102,7 @@ class TestOAuthStatePersistence:
             # Verify state was loaded
             assert "persisted_state_abc" in store._oauth_states
             assert store._oauth_states["persisted_state_abc"]["session_id"] == "persisted_session"
+            assert store._oauth_states["persisted_state_abc"]["code_verifier"] == "persisted-verifier"
 
     def test_expired_states_cleaned_on_load(self):
         """Test that expired states are cleaned up when loading from disk."""
