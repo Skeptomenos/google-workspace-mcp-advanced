@@ -19,7 +19,7 @@ Use one of these OpenCode config files:
       "enabled": true,
       "command": [
         "uvx",
-    "google-workspace-mcp-advanced==1.0.6",
+        "google-workspace-mcp-advanced==1.0.6",
         "--transport",
         "stdio"
       ],
