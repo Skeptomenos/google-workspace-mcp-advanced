@@ -177,20 +177,24 @@ def _is_device_flow_invalid_client_error(details: str) -> bool:
     return ("invalid_client" in normalized and "device" in normalized) or "invalid client type" in normalized
 
 
-def _extract_port_from_redirect_uris(redirect_uris: list[str] | None) -> int | None:
-    """Extract the port from the first localhost redirect URI.
+def _extract_ports_from_redirect_uris(redirect_uris: list[str] | None) -> list[int]:
+    """Extract all localhost ports from registered redirect URIs.
 
-    This allows the callback server to start on the same port that is registered
-    in Google Cloud Console for the OAuth client, avoiding redirect_uri mismatch errors.
+    Returns ports in declaration order so the callback server can try each one
+    before falling back to sequential allocation.  This handles OAuth clients
+    that register multiple redirect URIs with different ports in Google Cloud
+    Console.
     """
+    ports: list[int] = []
     for uri in redirect_uris or []:
         try:
             parsed = urlparse(uri)
             if parsed.hostname in ("localhost", "127.0.0.1") and parsed.port:
-                return parsed.port
+                if parsed.port not in ports:
+                    ports.append(parsed.port)
         except Exception:
             continue
-    return None
+    return ports
 
 
 async def _start_callback_auth_challenge(
@@ -209,23 +213,23 @@ async def _start_callback_auth_challenge(
     # Resolve OAuth client to extract preferred port from its redirect_uris.
     # Wrapped in try/except so that failures here (e.g. missing config during
     # tests) fall back gracefully to sequential port allocation.
-    preferred_port: int | None = None
+    preferred_ports: list[int] = []
     try:
         oauth_client = _resolve_oauth_client_selection(user_google_email, override_client_key)
         # For "installed" (Desktop) clients, Google accepts any localhost port,
-        # so we only need to extract a preferred port for "web" clients.
+        # so we only need to extract preferred ports for "web" clients.
         if oauth_client.client_type != "installed":
-            preferred_port = _extract_port_from_redirect_uris(oauth_client.redirect_uris)
-            if preferred_port:
+            preferred_ports = _extract_ports_from_redirect_uris(oauth_client.redirect_uris)
+            if preferred_ports:
                 logger.info(
-                    "Using preferred OAuth callback port %d from client '%s' redirect_uris",
-                    preferred_port,
+                    "Using preferred OAuth callback ports %s from client '%s' redirect_uris",
+                    preferred_ports,
                     oauth_client.client_key,
                 )
     except Exception as exc:
         logger.debug("Could not resolve OAuth client for port extraction: %s", exc)
 
-    oauth_redirect_uri = resolve_oauth_redirect_uri_for_auth_flow(preferred_port=preferred_port)
+    oauth_redirect_uri = resolve_oauth_redirect_uri_for_auth_flow(preferred_ports=preferred_ports or None)
     auth_message = await start_auth_flow(
         user_google_email=user_google_email,
         service_name=service_name,
@@ -299,13 +303,14 @@ def _store_put_credential_for_client(
     return credential_store.store_credential(user_google_email, credentials)
 
 
-def resolve_oauth_redirect_uri_for_auth_flow(preferred_port: int | None = None) -> str:
+def resolve_oauth_redirect_uri_for_auth_flow(preferred_ports: list[int] | None = None) -> str:
     """
     Resolve redirect URI for callback-based auth and ensure callback availability in stdio mode.
 
     Args:
-        preferred_port: Port extracted from the OAuth client's registered redirect_uris.
-            Passed through to the callback server so it binds to the expected port.
+        preferred_ports: Ports extracted from the OAuth client's registered redirect_uris.
+            Passed through to the callback server so it tries each registered port
+            before falling back to sequential allocation.
     """
     transport_mode = get_transport_mode()
     if transport_mode != "stdio":
@@ -313,7 +318,7 @@ def resolve_oauth_redirect_uri_for_auth_flow(preferred_port: int | None = None) 
 
     from auth.oauth_callback_server import start_oauth_callback_server
 
-    success, error_msg, oauth_redirect_uri = start_oauth_callback_server(preferred_port=preferred_port)
+    success, error_msg, oauth_redirect_uri = start_oauth_callback_server(preferred_ports=preferred_ports)
     if not success or not oauth_redirect_uri:
         error_detail = f" ({error_msg})" if error_msg else ""
         raise GoogleAuthenticationError(f"Cannot initiate OAuth flow - callback server unavailable{error_detail}")

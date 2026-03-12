@@ -234,16 +234,17 @@ _minimal_oauth_server: MinimalOAuthServer | None = None
 
 def start_oauth_callback_server(
     base_uri: str = "http://localhost",
-    preferred_port: int | None = None,
+    preferred_ports: list[int] | None = None,
 ) -> tuple[bool, str, str | None]:
     """
-    Start OAuth callback server, preferring the port declared in the OAuth client's redirect_uris.
+    Start OAuth callback server, preferring ports declared in the OAuth client's redirect_uris.
 
     Args:
         base_uri: Base URI scheme + host (default http://localhost).
-        preferred_port: Port extracted from the OAuth client's registered redirect_uris.
-            When set, this port is tried first so the callback URL matches Google Cloud Console.
-            Falls back to sequential allocation if occupied.
+        preferred_ports: Ports extracted from the OAuth client's registered redirect_uris.
+            Each port is tried in order so the callback URL matches one of the URIs
+            registered in Google Cloud Console.  Falls back to sequential allocation
+            only when every preferred port is occupied.
 
     Returns:
         Tuple of (success, error_message, redirect_uri)
@@ -255,20 +256,26 @@ def start_oauth_callback_server(
 
     port: int | None = None
 
-    # Try preferred port first (from OAuth client redirect_uris)
-    if preferred_port is not None:
+    # Try each preferred port in declaration order (from OAuth client redirect_uris)
+    for candidate in preferred_ports or []:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind(("localhost", preferred_port))
-            port = preferred_port
-            logger.info("Using preferred OAuth callback port %d (from client redirect_uris)", preferred_port)
+                s.bind(("localhost", candidate))
+            port = candidate
+            logger.info("Using preferred OAuth callback port %d (from client redirect_uris)", candidate)
+            break
         except OSError:
-            logger.warning(
-                "Preferred OAuth callback port %d (from client redirect_uris) is occupied; "
-                "falling back to sequential port allocation",
-                preferred_port,
+            logger.debug(
+                "Preferred OAuth callback port %d is occupied; trying next registered port",
+                candidate,
             )
+
+    if port is None and preferred_ports:
+        logger.warning(
+            "All preferred OAuth callback ports %s are occupied; falling back to sequential allocation",
+            preferred_ports,
+        )
 
     # Sequential fallback
     if port is None:
