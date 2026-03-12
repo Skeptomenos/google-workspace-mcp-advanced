@@ -207,7 +207,7 @@ async def test_initiate_auth_challenge_device_invalid_client_falls_back_to_callb
     )
     monkeypatch.setattr(
         "auth.google_auth.resolve_oauth_redirect_uri_for_auth_flow",
-        lambda: "http://localhost:9876/oauth2callback",
+        lambda **_: "http://localhost:9876/oauth2callback",
     )
     monkeypatch.setattr("auth.google_auth.start_auth_flow", start_auth_flow_mock)
 
@@ -257,7 +257,7 @@ async def test_initiate_auth_challenge_poll_invalid_client_falls_back_to_callbac
     )
     monkeypatch.setattr(
         "auth.google_auth.resolve_oauth_redirect_uri_for_auth_flow",
-        lambda: "http://localhost:9876/oauth2callback",
+        lambda **_: "http://localhost:9876/oauth2callback",
     )
     monkeypatch.setattr("auth.google_auth.start_auth_flow", start_auth_flow_mock)
 
@@ -281,7 +281,7 @@ async def test_initiate_auth_challenge_callback_mode_uses_start_auth_flow(monkey
     monkeypatch.setattr("auth.google_auth._get_effective_auth_flow_mode", lambda *_, **__: AUTH_FLOW_CALLBACK)
     monkeypatch.setattr(
         "auth.google_auth.resolve_oauth_redirect_uri_for_auth_flow",
-        lambda: "http://localhost:9876/oauth2callback",
+        lambda **_: "http://localhost:9876/oauth2callback",
     )
     monkeypatch.setattr("auth.google_auth.start_auth_flow", start_auth_flow_mock)
 

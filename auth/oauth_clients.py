@@ -29,6 +29,8 @@ class OAuthClientSelection:
     source: str
     selection_mode: str
     flow_preference: str | None = None
+    redirect_uris: list[str] | None = None
+    client_type: str | None = None
 
 
 def get_auth_clients_config_path() -> str:
@@ -262,6 +264,12 @@ def resolve_oauth_client_for_user(
     if isinstance(profile.get("flow_preference"), str):
         flow_preference = profile["flow_preference"].strip().lower() or None
 
+    redirect_uris_raw = profile.get("redirect_uris", [])
+    redirect_uris = [str(u) for u in redirect_uris_raw if isinstance(u, str) and str(u).strip()] or None
+
+    client_type_raw = profile.get("client_type")
+    client_type = str(client_type_raw).strip() if isinstance(client_type_raw, str) else None
+
     return OAuthClientSelection(
         client_key=resolved_key,
         client_id=client_id,
@@ -269,14 +277,26 @@ def resolve_oauth_client_for_user(
         source=source,
         selection_mode=selection_mode,
         flow_preference=flow_preference,
+        redirect_uris=redirect_uris,
+        client_type=client_type,
     )
 
 
-def _extract_google_client_credentials(client_json: dict[str, Any]) -> tuple[str, str | None]:
-    """Extract client id/secret from Google OAuth client JSON format."""
+def _extract_google_client_credentials(
+    client_json: dict[str, Any],
+) -> tuple[str, str | None, list[str], str]:
+    """Extract client id, secret, redirect_uris, and client_type from Google OAuth client JSON.
+
+    Returns:
+        Tuple of (client_id, client_secret, redirect_uris, client_type).
+        client_type is 'web' or 'installed' based on the top-level key in the JSON.
+    """
+    client_type = "web"
     payload = client_json.get("web") if isinstance(client_json, dict) else None
     if payload is None and isinstance(client_json, dict):
         payload = client_json.get("installed")
+        if payload is not None:
+            client_type = "installed"
     if payload is None and isinstance(client_json, dict):
         payload = client_json
     if not isinstance(payload, dict):
@@ -286,9 +306,12 @@ def _extract_google_client_credentials(client_json: dict[str, Any]) -> tuple[str
     client_secret_raw = payload.get("client_secret")
     client_secret = str(client_secret_raw).strip() if isinstance(client_secret_raw, str) else None
 
+    redirect_uris_raw = payload.get("redirect_uris", [])
+    redirect_uris = [str(u) for u in redirect_uris_raw if isinstance(u, str) and str(u).strip()]
+
     if not client_id:
         raise AuthenticationError("OAuth client JSON is missing required field 'client_id'")
-    return client_id, client_secret
+    return client_id, client_secret, redirect_uris, client_type
 
 
 def import_oauth_client_config(
@@ -313,7 +336,7 @@ def import_oauth_client_config(
     except Exception as exc:
         raise AuthenticationError(f"Failed to read OAuth client JSON '{source_path}': {exc}") from exc
 
-    client_id, client_secret = _extract_google_client_credentials(source_json)
+    client_id, client_secret, redirect_uris, client_type = _extract_google_client_credentials(source_json)
 
     config, _ = ensure_auth_clients_config()
     oauth_clients = _normalize_clients_map(config.get("oauth_clients", {}))
@@ -336,6 +359,8 @@ def import_oauth_client_config(
         "client_secret": client_secret,
         "allowed_domains": normalized_domains,
         "flow_preference": flow_preference.strip().lower() or "auto",
+        "redirect_uris": redirect_uris,
+        "client_type": client_type,
     }
     for email in normalized_accounts:
         account_clients[email] = normalized_client_key

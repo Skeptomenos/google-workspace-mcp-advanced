@@ -4,13 +4,15 @@ Transport-aware OAuth callback handling.
 In streamable-http mode: Uses the existing FastAPI server
 In stdio mode: Starts a minimal HTTP server just for OAuth callbacks
 
-Uses dynamic port allocation (9876-9899) to avoid conflicts when multiple
-MCP server instances run simultaneously.
+Port selection strategy:
+1. If the OAuth client JSON declares redirect_uris with a localhost port,
+   that port is used first (so it matches Google Cloud Console registration).
+2. Otherwise, tries ports sequentially starting from 9876.
+3. Falls back to the next port only when the preferred port is occupied.
 """
 
 import asyncio
 import logging
-import random
 import socket
 import threading
 import time
@@ -35,11 +37,13 @@ PORT_RANGE_END = 9899
 
 
 def find_available_port(start: int = PORT_RANGE_START, end: int = PORT_RANGE_END) -> int | None:
-    """Find an available port in the given range using random order to minimize collisions."""
-    ports = list(range(start, end + 1))
-    random.shuffle(ports)
+    """Find an available port in the given range using sequential order.
 
-    for port in ports:
+    Tries ports starting from `start` (default 9876) so the redirect URI is
+    deterministic across installations. Only falls back to subsequent ports
+    when the preferred port is genuinely occupied by another process.
+    """
+    for port in range(start, end + 1):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -230,9 +234,16 @@ _minimal_oauth_server: MinimalOAuthServer | None = None
 
 def start_oauth_callback_server(
     base_uri: str = "http://localhost",
+    preferred_port: int | None = None,
 ) -> tuple[bool, str, str | None]:
     """
-    Start OAuth callback server on a dynamically allocated port.
+    Start OAuth callback server, preferring the port declared in the OAuth client's redirect_uris.
+
+    Args:
+        base_uri: Base URI scheme + host (default http://localhost).
+        preferred_port: Port extracted from the OAuth client's registered redirect_uris.
+            When set, this port is tried first so the callback URL matches Google Cloud Console.
+            Falls back to sequential allocation if occupied.
 
     Returns:
         Tuple of (success, error_message, redirect_uri)
@@ -242,13 +253,32 @@ def start_oauth_callback_server(
     if _minimal_oauth_server is not None and _minimal_oauth_server.is_running:
         return True, "", _minimal_oauth_server.redirect_uri
 
-    port = find_available_port()
+    port: int | None = None
+
+    # Try preferred port first (from OAuth client redirect_uris)
+    if preferred_port is not None:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("localhost", preferred_port))
+            port = preferred_port
+            logger.info("Using preferred OAuth callback port %d (from client redirect_uris)", preferred_port)
+        except OSError:
+            logger.warning(
+                "Preferred OAuth callback port %d (from client redirect_uris) is occupied; "
+                "falling back to sequential port allocation",
+                preferred_port,
+            )
+
+    # Sequential fallback
     if port is None:
-        return (
-            False,
-            f"No available port in range {PORT_RANGE_START}-{PORT_RANGE_END}",
-            None,
-        )
+        port = find_available_port()
+        if port is None:
+            return (
+                False,
+                f"No available port in range {PORT_RANGE_START}-{PORT_RANGE_END}",
+                None,
+            )
 
     logger.info(f"Starting OAuth callback server on {base_uri}:{port}")
     _minimal_oauth_server = MinimalOAuthServer(port, base_uri)

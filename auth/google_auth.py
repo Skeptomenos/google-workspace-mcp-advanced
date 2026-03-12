@@ -177,6 +177,22 @@ def _is_device_flow_invalid_client_error(details: str) -> bool:
     return ("invalid_client" in normalized and "device" in normalized) or "invalid client type" in normalized
 
 
+def _extract_port_from_redirect_uris(redirect_uris: list[str] | None) -> int | None:
+    """Extract the port from the first localhost redirect URI.
+
+    This allows the callback server to start on the same port that is registered
+    in Google Cloud Console for the OAuth client, avoiding redirect_uri mismatch errors.
+    """
+    for uri in redirect_uris or []:
+        try:
+            parsed = urlparse(uri)
+            if parsed.hostname in ("localhost", "127.0.0.1") and parsed.port:
+                return parsed.port
+        except Exception:
+            continue
+    return None
+
+
 async def _start_callback_auth_challenge(
     user_google_email: str,
     service_name: str,
@@ -184,8 +200,32 @@ async def _start_callback_auth_challenge(
     fallback_reason: str | None = None,
     override_client_key: str | None = None,
 ) -> tuple[None, str]:
-    """Start callback flow and optionally prefix a fallback explanation."""
-    oauth_redirect_uri = resolve_oauth_redirect_uri_for_auth_flow()
+    """Start callback flow and optionally prefix a fallback explanation.
+
+    Resolves the OAuth client first to extract the preferred callback port from
+    its registered redirect_uris, ensuring the callback server binds to the port
+    that matches Google Cloud Console registration.
+    """
+    # Resolve OAuth client to extract preferred port from its redirect_uris.
+    # Wrapped in try/except so that failures here (e.g. missing config during
+    # tests) fall back gracefully to sequential port allocation.
+    preferred_port: int | None = None
+    try:
+        oauth_client = _resolve_oauth_client_selection(user_google_email, override_client_key)
+        # For "installed" (Desktop) clients, Google accepts any localhost port,
+        # so we only need to extract a preferred port for "web" clients.
+        if oauth_client.client_type != "installed":
+            preferred_port = _extract_port_from_redirect_uris(oauth_client.redirect_uris)
+            if preferred_port:
+                logger.info(
+                    "Using preferred OAuth callback port %d from client '%s' redirect_uris",
+                    preferred_port,
+                    oauth_client.client_key,
+                )
+    except Exception as exc:
+        logger.debug("Could not resolve OAuth client for port extraction: %s", exc)
+
+    oauth_redirect_uri = resolve_oauth_redirect_uri_for_auth_flow(preferred_port=preferred_port)
     auth_message = await start_auth_flow(
         user_google_email=user_google_email,
         service_name=service_name,
@@ -259,9 +299,13 @@ def _store_put_credential_for_client(
     return credential_store.store_credential(user_google_email, credentials)
 
 
-def resolve_oauth_redirect_uri_for_auth_flow() -> str:
+def resolve_oauth_redirect_uri_for_auth_flow(preferred_port: int | None = None) -> str:
     """
     Resolve redirect URI for callback-based auth and ensure callback availability in stdio mode.
+
+    Args:
+        preferred_port: Port extracted from the OAuth client's registered redirect_uris.
+            Passed through to the callback server so it binds to the expected port.
     """
     transport_mode = get_transport_mode()
     if transport_mode != "stdio":
@@ -269,7 +313,7 @@ def resolve_oauth_redirect_uri_for_auth_flow() -> str:
 
     from auth.oauth_callback_server import start_oauth_callback_server
 
-    success, error_msg, oauth_redirect_uri = start_oauth_callback_server()
+    success, error_msg, oauth_redirect_uri = start_oauth_callback_server(preferred_port=preferred_port)
     if not success or not oauth_redirect_uri:
         error_detail = f" ({error_msg})" if error_msg else ""
         raise GoogleAuthenticationError(f"Cannot initiate OAuth flow - callback server unavailable{error_detail}")
@@ -819,8 +863,11 @@ def create_oauth_flow(
 ) -> Flow:
     """Creates an OAuth flow using environment variables or client secrets file."""
     if oauth_client is not None:
+        # Use the original client_type ("web" or "installed") when available so that
+        # the Google auth library applies the correct redirect_uri validation rules.
+        config_key = oauth_client.client_type or "web"
         client_config = {
-            "web": {
+            config_key: {
                 "client_id": oauth_client.client_id,
                 "client_secret": oauth_client.client_secret,
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
