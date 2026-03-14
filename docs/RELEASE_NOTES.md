@@ -1,6 +1,6 @@
 # Release Notes
 
-## 2026-03-14 - Deterministic OAuth Callback and Auth Policy Stabilization
+## 2026-03-14 - Deterministic OAuth Callback and Auth Policy Stabilization + Release v1.0.9
 
 ### Fixed
 - Resolved callback auth policy before browser launch so one auth attempt now commits to one OAuth client, one flow, and one redirect policy.
@@ -21,6 +21,11 @@
 - Mapped profiles loaded from `auth_clients.json` must preserve `client_type`; mapped `web` profiles must also preserve `redirect_uris` for local callback auth.
 - `import_google_auth_client` is now the recommended way to populate mapped client config because it preserves the Google OAuth client metadata needed for deterministic callback policy.
 - Local `installed` and legacy env-only auth still allow sequential localhost callback fallback, while mapped `web` auth now binds only to registered ports.
+- Version bump to `1.0.9` in release artifacts:
+  - `pyproject.toml`
+  - `package.json`
+  - `uv.lock`
+- Updated pinned `uvx` examples in README and setup/distribution docs to `1.0.9`.
 
 ### Validation
 - `uv run pytest tests/unit/auth/test_google_auth_flow_modes.py tests/unit/auth/test_oauth_callback_server.py tests/unit/auth/test_auth_runtime_paths.py tests/unit/auth/test_oauth_state_persistence.py -q`
