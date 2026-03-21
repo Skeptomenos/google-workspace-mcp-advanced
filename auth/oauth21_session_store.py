@@ -1,0 +1,1463 @@
+"""
+OAuth 2.1 Session Store for Google Services
+
+This module provides a global store for OAuth 2.1 authenticated sessions
+that can be accessed by Google service decorators. It also includes
+session context management and credential conversion functionality.
+"""
+
+import contextvars
+import json
+import logging
+import os
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from threading import RLock
+from typing import Any, Optional, Protocol
+
+from fastmcp.server.auth import AccessToken
+from google.oauth2.credentials import Credentials
+
+from auth.config import get_credentials_directory
+from auth.security_io import atomic_write_json, ensure_secure_directory
+
+logger = logging.getLogger(__name__)
+
+
+class _SecretValueProtocol(Protocol):
+    """Protocol for objects with get_secret_value method (e.g., Pydantic SecretStr)."""
+
+    def get_secret_value(self) -> str: ...
+
+
+def _get_oauth_states_file_path() -> str:
+    """Get the file path for persisting OAuth states."""
+    base_dir = _get_oauth_persistence_base_dir()
+    return os.path.join(base_dir, "oauth_states.json")
+
+
+def _get_oauth_persistence_base_dir() -> str:
+    """Resolve the base directory for OAuth state and session persistence."""
+    # Backward-compatibility override kept for existing deployments.
+    env_dir = os.getenv("GOOGLE_MCP_CREDENTIALS_DIR")
+    if env_dir:
+        base_dir = env_dir
+    else:
+        base_dir = get_credentials_directory()
+
+    # Ensure directory exists with secure permissions
+    ensure_secure_directory(base_dir)
+    return base_dir
+
+
+def _get_device_flows_file_path() -> str:
+    """Get the file path for persisting pending OAuth device flows."""
+    base_dir = _get_oauth_persistence_base_dir()
+    return os.path.join(base_dir, "pending_device_flows.json")
+
+
+def _normalize_expiry_to_naive_utc(expiry: Any | None) -> datetime | None:
+    """
+    Convert expiry values to timezone-naive UTC datetimes for google-auth compatibility.
+
+    Naive datetime inputs are assumed to already represent UTC and are returned unchanged so that
+    google-auth Credentials receive naive UTC datetimes for expiry comparison.
+    """
+    if expiry is None:
+        return None
+
+    if isinstance(expiry, datetime):
+        if expiry.tzinfo is not None:
+            try:
+                return expiry.astimezone(timezone.utc).replace(tzinfo=None)
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("Failed to normalize aware expiry; returning without tzinfo")
+                return expiry.replace(tzinfo=None)
+        return expiry  # Already naive; assumed to represent UTC
+
+    if isinstance(expiry, str):
+        try:
+            parsed = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+        except ValueError:
+            logger.debug("Failed to parse expiry string '%s'", expiry)
+            return None
+        return _normalize_expiry_to_naive_utc(parsed)
+
+    logger.debug("Unsupported expiry type '%s' (%s)", expiry, type(expiry))
+    return None
+
+
+# Context variable to store the current session information
+_current_session_context: contextvars.ContextVar[Optional["SessionContext"]] = contextvars.ContextVar(
+    "current_session_context", default=None
+)
+
+
+@dataclass
+class SessionContext:
+    """Container for session-related information."""
+
+    session_id: str | None = None
+    user_id: str | None = None
+    auth_context: Any | None = None
+    request: Any | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    issuer: str | None = None
+
+    def __repr__(self) -> str:
+        return f"SessionContext(session_id={self.session_id!r}, user_id={self.user_id!r}, issuer={self.issuer!r})"
+
+
+def set_session_context(context: SessionContext | None) -> None:
+    """
+    Set the current session context.
+
+    Args:
+        context: The session context to set
+    """
+    _current_session_context.set(context)
+    if context:
+        logger.debug(f"Set session context: session_id={context.session_id}, user_id={context.user_id}")
+    else:
+        logger.debug("Cleared session context")
+
+
+def get_session_context() -> SessionContext | None:
+    """
+    Get the current session context.
+
+    Returns:
+        The current session context or None
+    """
+    return _current_session_context.get()
+
+
+def clear_session_context() -> None:
+    """Clear the current session context."""
+    set_session_context(None)
+
+
+class SessionContextManager:
+    """
+    Context manager for temporarily setting session context.
+
+    Usage:
+        with SessionContextManager(session_context):
+            # Code that needs access to session context
+            pass
+    """
+
+    def __init__(self, context: SessionContext | None):
+        self.context = context
+        self.token = None
+
+    def __enter__(self):
+        """Set the session context."""
+        self.token = _current_session_context.set(self.context)
+        return self.context
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Reset the session context."""
+        if self.token:
+            _current_session_context.reset(self.token)
+
+
+def extract_session_from_headers(headers: dict[str, str]) -> str | None:
+    """
+    Extract session ID from request headers.
+
+    Args:
+        headers: Request headers
+
+    Returns:
+        Session ID if found
+    """
+    # Try different header names
+    session_id = headers.get("mcp-session-id") or headers.get("Mcp-Session-Id")
+    if session_id:
+        return session_id
+
+    session_id = headers.get("x-session-id") or headers.get("X-Session-ID")
+    if session_id:
+        return session_id
+
+    # Try Authorization header for Bearer token
+    auth_header = headers.get("authorization") or headers.get("Authorization")
+    if auth_header and auth_header.lower().startswith("bearer "):
+        # Extract bearer token and try to find associated session
+        token = auth_header[7:]  # Remove "Bearer " prefix
+        if token:
+            # Look for a session that has this access token
+            # This requires scanning sessions, but bearer tokens should be unique
+            store = get_oauth21_session_store()
+            for user_email, session_info in store._sessions.items():
+                if session_info.get("access_token") == token:
+                    return session_info.get("session_id") or f"bearer_{user_email}"
+
+        # If no session found, create a temporary session ID from token hash
+        # This allows header-based authentication to work with session context
+        import hashlib
+
+        token_hash = hashlib.sha256(token.encode()).hexdigest()[:8]
+        return f"bearer_token_{token_hash}"
+
+    return None
+
+
+# =============================================================================
+# OAuth21SessionStore - Main Session Management
+# =============================================================================
+
+
+class OAuth21SessionStore:
+    """
+    Global store for OAuth 2.1 authenticated sessions.
+
+    This store maintains a mapping of user emails to their OAuth 2.1
+    authenticated credentials, allowing Google services to access them.
+    It also maintains a mapping from FastMCP session IDs to user emails.
+
+    Security: Sessions are bound to specific users and can only access
+    their own credentials.
+
+    OAuth states are persisted to disk to survive server restarts during
+    the OAuth flow.
+    """
+
+    def __init__(self):
+        self._sessions: dict[str, dict[str, Any]] = {}
+        self._mcp_session_mapping: dict[str, str] = {}  # Maps FastMCP session ID -> user email
+        self._mcp_session_client_mapping: dict[str, str] = {}  # Maps FastMCP session ID -> oauth client key
+        self._session_auth_binding: dict[str, str] = {}  # Maps session ID -> authenticated user email (immutable)
+        self._oauth_states: dict[str, dict[str, Any]] = {}
+        self._pending_device_flows: dict[str, dict[str, Any]] = {}
+        self._lock = RLock()
+        self._states_file_path = _get_oauth_states_file_path()
+        self._device_flows_file_path = _get_device_flows_file_path()
+
+        # Load persisted OAuth states on initialization
+        self._load_oauth_states_from_disk()
+
+        # Load persisted session mappings on initialization
+        self._load_session_mappings_from_disk()
+
+        # Load pending device flows on initialization
+        self._load_device_flows_from_disk()
+
+    def _cleanup_expired_oauth_states_locked(self):
+        """Remove expired OAuth state entries. Caller must hold lock."""
+        now = datetime.now(timezone.utc)
+        expired_states = [
+            state for state, data in self._oauth_states.items() if data.get("expires_at") and data["expires_at"] <= now
+        ]
+        for state in expired_states:
+            del self._oauth_states[state]
+            logger.debug(
+                "Removed expired OAuth state: %s",
+                state[:8] if len(state) > 8 else state,
+            )
+
+    @staticmethod
+    def _session_user_key(user_email: str, oauth_client_key: str | None = None) -> str:
+        """Build in-memory session key with optional client dimension."""
+        if oauth_client_key:
+            return f"{oauth_client_key}::{user_email}"
+        return user_email
+
+    @staticmethod
+    def _pending_device_flow_key(user_email: str, oauth_client_key: str | None = None) -> str:
+        """Build pending device flow key with optional client dimension."""
+        if oauth_client_key:
+            return f"{oauth_client_key}::{user_email}"
+        return user_email
+
+    def _cleanup_expired_device_flows_locked(self):
+        """Remove expired pending device flows. Caller must hold lock."""
+        now = datetime.now(timezone.utc)
+        expired_users = []
+        for user_email, flow_data in self._pending_device_flows.items():
+            expires_at = flow_data.get("expires_at")
+            if isinstance(expires_at, datetime) and expires_at <= now:
+                expired_users.append(user_email)
+
+        for user_email in expired_users:
+            del self._pending_device_flows[user_email]
+            logger.info("Removed expired pending device flow for %s", user_email)
+
+    def _load_oauth_states_from_disk(self):
+        """Load persisted OAuth states from disk on initialization."""
+        try:
+            if not os.path.exists(self._states_file_path):
+                logger.debug("No persisted OAuth states file found at %s", self._states_file_path)
+                return
+
+            with open(self._states_file_path) as f:
+                persisted_data = json.load(f)
+
+            if not isinstance(persisted_data, dict):
+                logger.warning("Invalid OAuth states file format, ignoring")
+                return
+
+            # Convert ISO format strings back to datetime objects
+            loaded_count = 0
+            for state, data in persisted_data.items():
+                try:
+                    if "expires_at" in data and data["expires_at"]:
+                        data["expires_at"] = datetime.fromisoformat(data["expires_at"])
+                    if "created_at" in data and data["created_at"]:
+                        data["created_at"] = datetime.fromisoformat(data["created_at"])
+                    self._oauth_states[state] = data
+                    loaded_count += 1
+                except (ValueError, TypeError) as e:
+                    logger.warning(
+                        "Failed to parse OAuth state %s: %s",
+                        state[:8] if len(state) > 8 else state,
+                        e,
+                    )
+
+            # Clean up expired states after loading
+            self._cleanup_expired_oauth_states_locked()
+
+            logger.info(
+                "Loaded %d OAuth states from disk (%d after cleanup)",
+                loaded_count,
+                len(self._oauth_states),
+            )
+
+        except json.JSONDecodeError as e:
+            logger.warning("OAuth states file corrupted, starting fresh: %s", e)
+        except PermissionError as e:
+            logger.error("Permission denied reading OAuth states file: %s", e)
+        except OSError as e:
+            logger.warning("Failed to read OAuth states file: %s", e)
+        except Exception as e:
+            logger.error("Unexpected error loading OAuth states: %s", e)
+
+    def _save_oauth_states_to_disk(self):
+        """Persist OAuth states to disk. Caller must hold lock."""
+        try:
+            # Convert datetime objects to ISO format strings for JSON serialization
+            serializable_data = {}
+            for state, data in self._oauth_states.items():
+                serializable_data[state] = {
+                    "session_id": data.get("session_id"),
+                    "oauth_client_key": data.get("oauth_client_key"),
+                    "expected_user_email": data.get("expected_user_email"),
+                    "code_verifier": data.get("code_verifier"),
+                    "redirect_uri": data.get("redirect_uri"),
+                    "expires_at": data["expires_at"].isoformat() if data.get("expires_at") else None,
+                    "created_at": data["created_at"].isoformat() if data.get("created_at") else None,
+                }
+
+            atomic_write_json(self._states_file_path, serializable_data)
+            logger.debug("Persisted %d OAuth states to disk", len(serializable_data))
+
+        except OSError as e:
+            logger.error("Failed to persist OAuth states to disk: %s", e)
+        except Exception as e:
+            logger.error("Unexpected error persisting OAuth states: %s", e)
+
+    def _get_sessions_file_path(self) -> str:
+        """Get the file path for persisting session mappings."""
+        base_dir = os.path.dirname(self._states_file_path)
+        return os.path.join(base_dir, "session_mappings.json")
+
+    def _load_session_mappings_from_disk(self):
+        """Load persisted session mappings on initialization."""
+        sessions_file = self._get_sessions_file_path()
+        try:
+            if not os.path.exists(sessions_file):
+                logger.debug("No persisted session mappings file found at %s", sessions_file)
+                return
+
+            with open(sessions_file) as f:
+                data = json.load(f)
+
+            if not isinstance(data, dict):
+                logger.warning("Invalid session mappings file format, ignoring")
+                return
+
+            self._mcp_session_mapping = data.get("mcp_session_mapping", {})
+            self._mcp_session_client_mapping = data.get("mcp_session_client_mapping", {})
+            self._session_auth_binding = data.get("session_auth_binding", {})
+
+            # NOTE: We intentionally do NOT populate self._sessions from disk.
+            # The _sessions dict requires full credential data (access_token, etc.)
+            # which we don't persist for security reasons. Sessions will be
+            # populated lazily when credentials are retrieved from the file store
+            # and bound to an MCP session via store_session().
+            #
+            # What we DO persist and restore:
+            # - _mcp_session_mapping: Maps MCP session ID -> user email
+            # - _session_auth_binding: Immutable session-to-user bindings
+            #
+            # This allows auto-recovery to work: when a request comes in with
+            # a known MCP session ID, we can look up the user email and then
+            # load their credentials from the file-based credential store.
+
+            logger.info(
+                "Loaded session mappings: %d MCP sessions, %d auth bindings",
+                len(self._mcp_session_mapping),
+                len(self._session_auth_binding),
+            )
+
+        except json.JSONDecodeError as e:
+            logger.warning("Session mappings file corrupted, starting fresh: %s", e)
+        except PermissionError as e:
+            logger.error("Permission denied reading session mappings file: %s", e)
+        except OSError as e:
+            logger.warning("Failed to read session mappings file: %s", e)
+        except Exception as e:
+            logger.error("Unexpected error loading session mappings: %s", e)
+
+    def _save_session_mappings_to_disk(self):
+        """Persist session mappings to disk. Caller must hold lock."""
+        sessions_file = self._get_sessions_file_path()
+        try:
+            # Only persist the mappings, not the full session data.
+            # Session data contains tokens which should not be persisted here.
+            # Credentials are stored separately in the credential store.
+            data = {
+                "mcp_session_mapping": self._mcp_session_mapping,
+                "mcp_session_client_mapping": self._mcp_session_client_mapping,
+                "session_auth_binding": self._session_auth_binding,
+            }
+
+            atomic_write_json(sessions_file, data)
+            logger.debug("Persisted session mappings to %s", sessions_file)
+
+        except OSError as e:
+            logger.error("Failed to persist session mappings to disk: %s", e)
+        except Exception as e:
+            logger.error("Unexpected error persisting session mappings: %s", e)
+
+    def _load_device_flows_from_disk(self):
+        """Load pending device auth flows from disk on initialization."""
+        try:
+            if not os.path.exists(self._device_flows_file_path):
+                logger.debug("No persisted pending device flows file found at %s", self._device_flows_file_path)
+                return
+
+            with open(self._device_flows_file_path) as f:
+                persisted_data = json.load(f)
+
+            if not isinstance(persisted_data, dict):
+                logger.warning("Invalid pending device flows file format, ignoring")
+                return
+
+            loaded_count = 0
+            for user_email, flow_data in persisted_data.items():
+                try:
+                    if "expires_at" in flow_data and flow_data["expires_at"]:
+                        flow_data["expires_at"] = datetime.fromisoformat(flow_data["expires_at"])
+                    if "created_at" in flow_data and flow_data["created_at"]:
+                        flow_data["created_at"] = datetime.fromisoformat(flow_data["created_at"])
+                    self._pending_device_flows[user_email] = flow_data
+                    loaded_count += 1
+                except (ValueError, TypeError) as e:
+                    logger.warning("Failed to parse pending device flow for %s: %s", user_email, e)
+
+            self._cleanup_expired_device_flows_locked()
+            logger.info("Loaded %d pending device flows from disk", loaded_count)
+        except json.JSONDecodeError as e:
+            logger.warning("Pending device flows file corrupted, starting fresh: %s", e)
+        except PermissionError as e:
+            logger.error("Permission denied reading pending device flows file: %s", e)
+        except OSError as e:
+            logger.warning("Failed to read pending device flows file: %s", e)
+        except Exception as e:
+            logger.error("Unexpected error loading pending device flows: %s", e)
+
+    def _save_device_flows_to_disk(self):
+        """Persist pending device auth flows to disk. Caller must hold lock."""
+        try:
+            serializable_data = {}
+            for user_email, flow_data in self._pending_device_flows.items():
+                serializable_data[user_email] = {
+                    "device_code": flow_data.get("device_code"),
+                    "user_code": flow_data.get("user_code"),
+                    "verification_url": flow_data.get("verification_url"),
+                    "verification_url_complete": flow_data.get("verification_url_complete"),
+                    "interval": flow_data.get("interval"),
+                    "expires_at": flow_data["expires_at"].isoformat() if flow_data.get("expires_at") else None,
+                    "created_at": flow_data["created_at"].isoformat() if flow_data.get("created_at") else None,
+                }
+            atomic_write_json(self._device_flows_file_path, serializable_data)
+            logger.debug("Persisted %d pending device flows to disk", len(serializable_data))
+        except OSError as e:
+            logger.error("Failed to persist pending device flows to disk: %s", e)
+        except Exception as e:
+            logger.error("Unexpected error persisting pending device flows: %s", e)
+
+    def store_oauth_state(
+        self,
+        state: str,
+        session_id: str | None = None,
+        oauth_client_key: str | None = None,
+        expected_user_email: str | None = None,
+        code_verifier: str | None = None,
+        redirect_uri: str | None = None,
+        expires_in_seconds: int = 600,
+    ) -> None:
+        """Persist an OAuth state value for later validation.
+
+        States are stored both in memory and on disk to survive server restarts.
+        """
+        if not state:
+            raise ValueError("OAuth state must be provided")
+        if expires_in_seconds < 0:
+            raise ValueError("expires_in_seconds must be non-negative")
+
+        with self._lock:
+            self._cleanup_expired_oauth_states_locked()
+            now = datetime.now(timezone.utc)
+            expiry = now + timedelta(seconds=expires_in_seconds)
+            self._oauth_states[state] = {
+                "session_id": session_id,
+                "oauth_client_key": oauth_client_key,
+                "expected_user_email": expected_user_email,
+                "code_verifier": code_verifier,
+                "redirect_uri": redirect_uri,
+                "expires_at": expiry,
+                "created_at": now,
+            }
+
+            # Persist to disk to survive server restarts
+            self._save_oauth_states_to_disk()
+
+            logger.debug(
+                "Stored OAuth state %s (expires at %s)",
+                state[:8] if len(state) > 8 else state,
+                expiry.isoformat(),
+            )
+
+    def validate_and_consume_oauth_state(
+        self,
+        state: str,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Validate that a state value exists and consume it.
+
+        Args:
+            state: The OAuth state returned by Google.
+            session_id: Optional session identifier that initiated the flow.
+
+        Returns:
+            Metadata associated with the state.
+
+        Raises:
+            ValueError: If the state is missing, expired, or does not match the session.
+        """
+        if not state:
+            raise ValueError("Missing OAuth state parameter")
+
+        with self._lock:
+            self._cleanup_expired_oauth_states_locked()
+            state_info = self._oauth_states.get(state)
+
+            if not state_info:
+                logger.error("SECURITY: OAuth callback received unknown or expired state")
+                raise ValueError("Invalid or expired OAuth state parameter")
+
+            bound_session = state_info.get("session_id")
+            if bound_session and session_id and bound_session != session_id:
+                # Consume the state to prevent replay attempts
+                del self._oauth_states[state]
+                self._save_oauth_states_to_disk()
+                logger.error(
+                    "SECURITY: OAuth state session mismatch (expected %s, got %s)",
+                    bound_session,
+                    session_id,
+                )
+                raise ValueError("OAuth state does not match the initiating session")
+
+            # State is valid – consume it to prevent reuse
+            del self._oauth_states[state]
+            self._save_oauth_states_to_disk()
+            logger.debug(
+                "Validated OAuth state %s",
+                state[:8] if len(state) > 8 else state,
+            )
+            return state_info
+
+    def validate_oauth_state(self, state: str, session_id: str | None = None) -> dict[str, Any]:
+        """
+        Validate an OAuth state value without consuming it.
+
+        This supports retryable callback processing where state should only be consumed
+        after token exchange succeeds.
+        """
+        if not state:
+            raise ValueError("Missing OAuth state parameter")
+
+        with self._lock:
+            self._cleanup_expired_oauth_states_locked()
+            state_info = self._oauth_states.get(state)
+
+            if not state_info:
+                logger.error("SECURITY: OAuth callback received unknown or expired state")
+                raise ValueError("Invalid or expired OAuth state parameter")
+
+            bound_session = state_info.get("session_id")
+            if bound_session and session_id and bound_session != session_id:
+                del self._oauth_states[state]
+                self._save_oauth_states_to_disk()
+                logger.error(
+                    "SECURITY: OAuth state session mismatch (expected %s, got %s)",
+                    bound_session,
+                    session_id,
+                )
+                raise ValueError("OAuth state does not match the initiating session")
+
+            return state_info
+
+    def consume_oauth_state(self, state: str) -> None:
+        """Consume an OAuth state value after successful callback processing."""
+        if not state:
+            raise ValueError("Missing OAuth state parameter")
+
+        with self._lock:
+            self._cleanup_expired_oauth_states_locked()
+            if state in self._oauth_states:
+                del self._oauth_states[state]
+                self._save_oauth_states_to_disk()
+                logger.debug("Consumed OAuth state %s", state[:8] if len(state) > 8 else state)
+
+    def store_pending_device_flow(
+        self,
+        user_email: str,
+        oauth_client_key: str | None,
+        device_code: str,
+        user_code: str,
+        verification_url: str,
+        verification_url_complete: str | None,
+        interval: int,
+        expires_at: datetime,
+    ) -> None:
+        """Store pending OAuth device flow metadata for a user."""
+        if not user_email:
+            raise ValueError("user_email must be provided")
+        if not device_code:
+            raise ValueError("device_code must be provided")
+
+        flow_key = self._pending_device_flow_key(user_email, oauth_client_key)
+        with self._lock:
+            self._cleanup_expired_device_flows_locked()
+            self._pending_device_flows[flow_key] = {
+                "device_code": device_code,
+                "user_code": user_code,
+                "verification_url": verification_url,
+                "verification_url_complete": verification_url_complete,
+                "interval": interval,
+                "oauth_client_key": oauth_client_key,
+                "user_email": user_email,
+                "created_at": datetime.now(timezone.utc),
+                "expires_at": expires_at,
+            }
+            self._save_device_flows_to_disk()
+
+    def get_pending_device_flow(self, user_email: str, oauth_client_key: str | None = None) -> dict[str, Any] | None:
+        """Get pending OAuth device flow metadata for a user."""
+        if not user_email:
+            return None
+
+        flow_key = self._pending_device_flow_key(user_email, oauth_client_key)
+        with self._lock:
+            self._cleanup_expired_device_flows_locked()
+            flow_data = self._pending_device_flows.get(flow_key)
+            if not flow_data:
+                return None
+            return dict(flow_data)
+
+    def clear_pending_device_flow(self, user_email: str, oauth_client_key: str | None = None) -> None:
+        """Clear pending OAuth device flow metadata for a user."""
+        if not user_email:
+            return
+
+        flow_key = self._pending_device_flow_key(user_email, oauth_client_key)
+        with self._lock:
+            if flow_key in self._pending_device_flows:
+                del self._pending_device_flows[flow_key]
+                self._save_device_flows_to_disk()
+
+    def store_session(
+        self,
+        user_email: str,
+        access_token: str,
+        refresh_token: str | None = None,
+        token_uri: str = "https://oauth2.googleapis.com/token",
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        scopes: list[str] | None = None,
+        expiry: Any | None = None,
+        session_id: str | None = None,
+        mcp_session_id: str | None = None,
+        issuer: str | None = None,
+        *,
+        oauth_client_key: str | None = None,
+    ) -> None:
+        """
+        Store OAuth 2.1 session information.
+
+        Args:
+            user_email: User's email address
+            access_token: OAuth 2.1 access token
+            oauth_client_key: OAuth client identifier for multi-client routing
+            refresh_token: OAuth 2.1 refresh token
+            token_uri: Token endpoint URI
+            client_id: OAuth client ID
+            client_secret: OAuth client secret
+            scopes: List of granted scopes
+            expiry: Token expiry time
+            session_id: OAuth 2.1 session ID
+            mcp_session_id: FastMCP session ID to map to this user
+            issuer: Token issuer (e.g., "https://accounts.google.com")
+        """
+        with self._lock:
+            normalized_expiry = _normalize_expiry_to_naive_utc(expiry)
+            session_user_key = self._session_user_key(user_email, oauth_client_key)
+            session_info = {
+                "user_email": user_email,
+                "oauth_client_key": oauth_client_key,
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_uri": token_uri,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "scopes": scopes or [],
+                "expiry": normalized_expiry,
+                "session_id": session_id,
+                "mcp_session_id": mcp_session_id,
+                "issuer": issuer,
+            }
+
+            self._sessions[session_user_key] = session_info
+
+            # Store MCP session mapping if provided
+            # Import diagnostics here to avoid circular imports
+            from auth.diagnostics import log_session_binding
+
+            if mcp_session_id:
+                # Create immutable session binding (first binding wins, cannot be changed)
+                if mcp_session_id not in self._session_auth_binding:
+                    self._session_auth_binding[mcp_session_id] = user_email
+                    logger.info(f"Created immutable session binding: {mcp_session_id} -> {user_email}")
+                    log_session_binding(
+                        mcp_session_id=mcp_session_id,
+                        user_email=user_email,
+                        action="bind",
+                        success=True,
+                        reason="new_binding",
+                    )
+                elif self._session_auth_binding[mcp_session_id] != user_email:
+                    # Security: Attempt to bind session to different user
+                    logger.error(
+                        f"SECURITY: Attempt to rebind session {mcp_session_id} from {self._session_auth_binding[mcp_session_id]} to {user_email}"
+                    )
+                    log_session_binding(
+                        mcp_session_id=mcp_session_id,
+                        user_email=user_email,
+                        action="bind",
+                        success=False,
+                        reason=f"already_bound_to_{self._session_auth_binding[mcp_session_id]}",
+                    )
+                    raise ValueError(f"Session {mcp_session_id} is already bound to a different user")
+
+                self._mcp_session_mapping[mcp_session_id] = user_email
+                if oauth_client_key:
+                    self._mcp_session_client_mapping[mcp_session_id] = oauth_client_key
+                logger.info(
+                    f"Stored OAuth 2.1 session for {user_email} (session_id: {session_id}, mcp_session_id: {mcp_session_id})"
+                )
+            else:
+                logger.info(f"Stored OAuth 2.1 session for {user_email} (session_id: {session_id})")
+
+            # Also create binding for the OAuth session ID
+            if session_id and session_id not in self._session_auth_binding:
+                self._session_auth_binding[session_id] = user_email
+
+            # Persist session mappings to disk
+            self._save_session_mappings_to_disk()
+
+    def get_credentials(self, user_email: str, oauth_client_key: str | None = None) -> Credentials | None:
+        """
+        Get Google credentials for a user from OAuth 2.1 session.
+
+        Args:
+            user_email: User's email address
+
+        Returns:
+            Google Credentials object or None
+        """
+        with self._lock:
+            session_info = self._sessions.get(self._session_user_key(user_email, oauth_client_key))
+            if not session_info and oauth_client_key:
+                # Backward compatibility: allow lookup of legacy user-only key.
+                session_info = self._sessions.get(user_email)
+            if not session_info and not oauth_client_key:
+                # If no client key requested, resolve uniquely by user_email if possible.
+                matches = [info for info in self._sessions.values() if info.get("user_email") == user_email]
+                if len(matches) == 1:
+                    session_info = matches[0]
+            if not session_info:
+                logger.debug(f"No OAuth 2.1 session found for {user_email}")
+                return None
+
+            try:
+                # Create Google credentials from session info
+                credentials = Credentials(
+                    token=session_info["access_token"],
+                    refresh_token=session_info.get("refresh_token"),
+                    token_uri=session_info["token_uri"],
+                    client_id=session_info.get("client_id"),
+                    client_secret=session_info.get("client_secret"),
+                    scopes=session_info.get("scopes", []),
+                    expiry=session_info.get("expiry"),
+                )
+
+                logger.debug(f"Retrieved OAuth 2.1 credentials for {user_email}")
+                return credentials
+
+            except Exception as e:
+                logger.error(f"Failed to create credentials for {user_email}: {e}")
+                return None
+
+    def get_credentials_by_mcp_session(self, mcp_session_id: str) -> Credentials | None:
+        """
+        Get Google credentials using FastMCP session ID.
+
+        This method first checks in-memory sessions, then falls back to the
+        file-based credential store. This enables session recovery after
+        server restart: the MCP session mapping survives (persisted to disk),
+        and credentials are loaded from the credential store.
+
+        Args:
+            mcp_session_id: FastMCP session ID
+
+        Returns:
+            Google Credentials object or None
+        """
+        # Import diagnostics here to avoid circular imports
+        from auth.diagnostics import log_credential_lookup, log_session_binding
+
+        with self._lock:
+            # Look up user email from MCP session mapping
+            user_email = self._mcp_session_mapping.get(mcp_session_id)
+            oauth_client_key = self._mcp_session_client_mapping.get(mcp_session_id)
+            if not user_email:
+                logger.debug(f"No user mapping found for MCP session {mcp_session_id}")
+                log_credential_lookup(
+                    source="mcp_session_mapping",
+                    user_email=None,
+                    session_id=mcp_session_id,
+                    found=False,
+                    reason="no_mapping",
+                )
+                return None
+
+            logger.debug(
+                "Found user %s for MCP session %s (client=%s)",
+                user_email,
+                mcp_session_id,
+                oauth_client_key or "legacy",
+            )
+            log_session_binding(
+                mcp_session_id=mcp_session_id,
+                user_email=user_email,
+                action="lookup",
+                success=True,
+                reason="mapping_found",
+            )
+
+            # First try in-memory session
+            credentials = self.get_credentials(user_email, oauth_client_key=oauth_client_key)
+            if credentials:
+                log_credential_lookup(
+                    source="memory_session",
+                    user_email=user_email,
+                    session_id=mcp_session_id,
+                    found=True,
+                )
+                return credentials
+
+            log_credential_lookup(
+                source="memory_session",
+                user_email=user_email,
+                session_id=mcp_session_id,
+                found=False,
+                reason="not_in_memory",
+            )
+
+            # Fall back to credential store (for post-restart recovery)
+            # Import here to avoid circular imports
+            from auth.credential_store import get_credential_store
+
+            cred_store = get_credential_store()
+            if oauth_client_key and hasattr(cred_store, "get_credential_for_client"):
+                credentials = cred_store.get_credential_for_client(oauth_client_key, user_email)  # type: ignore[attr-defined]
+            else:
+                credentials = cred_store.get_credential(user_email)
+            if credentials:
+                logger.info(
+                    f"Recovered credentials for {user_email} from credential store (MCP session {mcp_session_id})"
+                )
+                log_credential_lookup(
+                    source="file_store",
+                    user_email=user_email,
+                    session_id=mcp_session_id,
+                    found=True,
+                    reason="auto_recovery",
+                )
+                log_session_binding(
+                    mcp_session_id=mcp_session_id,
+                    user_email=user_email,
+                    action="auto_recover",
+                    success=True,
+                )
+                # Re-populate the in-memory session for future requests
+                self._sessions[self._session_user_key(user_email, oauth_client_key)] = {
+                    "user_email": user_email,
+                    "oauth_client_key": oauth_client_key,
+                    "access_token": credentials.token,
+                    "refresh_token": credentials.refresh_token,
+                    "token_uri": credentials.token_uri,
+                    "client_id": credentials.client_id,
+                    "client_secret": credentials.client_secret,
+                    "scopes": credentials.scopes,
+                    "expiry": credentials.expiry,
+                    "mcp_session_id": mcp_session_id,
+                    "issuer": "https://accounts.google.com",
+                }
+                return credentials
+
+            logger.debug(f"No credentials found for {user_email} in any store")
+            log_credential_lookup(
+                source="file_store",
+                user_email=user_email,
+                session_id=mcp_session_id,
+                found=False,
+                reason="not_in_file_store",
+            )
+            return None
+
+    def get_credentials_with_validation(
+        self,
+        requested_user_email: str,
+        oauth_client_key: str | None = None,
+        session_id: str | None = None,
+        auth_token_email: str | None = None,
+        allow_recent_auth: bool = False,
+    ) -> Credentials | None:
+        """
+        Get Google credentials with session validation.
+
+        This method ensures that a session can only access credentials for its
+        authenticated user, preventing cross-account access.
+
+        Args:
+            requested_user_email: The email of the user whose credentials are requested
+            session_id: The current session ID (MCP or OAuth session)
+            auth_token_email: Email from the verified auth token (if available)
+
+        Returns:
+            Google Credentials object if validation passes, None otherwise
+        """
+        with self._lock:
+            # Priority 1: Check auth token email (most secure, from verified JWT)
+            if auth_token_email:
+                if auth_token_email != requested_user_email:
+                    logger.error(
+                        f"SECURITY VIOLATION: Token for {auth_token_email} attempted to access "
+                        f"credentials for {requested_user_email}"
+                    )
+                    return None
+                # Token email matches, allow access
+                return self.get_credentials(requested_user_email, oauth_client_key=oauth_client_key)
+
+            # Priority 2: Check session binding
+            if session_id:
+                bound_user = self._session_auth_binding.get(session_id)
+                if bound_user:
+                    if bound_user != requested_user_email:
+                        logger.error(
+                            f"SECURITY VIOLATION: Session {session_id} (bound to {bound_user}) "
+                            f"attempted to access credentials for {requested_user_email}"
+                        )
+                        return None
+                    # Session binding matches, allow access
+                    return self.get_credentials(requested_user_email, oauth_client_key=oauth_client_key)
+
+                # Check if this is an MCP session
+                mcp_user = self._mcp_session_mapping.get(session_id)
+                if mcp_user:
+                    if mcp_user != requested_user_email:
+                        logger.error(
+                            f"SECURITY VIOLATION: MCP session {session_id} (user {mcp_user}) "
+                            f"attempted to access credentials for {requested_user_email}"
+                        )
+                        return None
+                    # MCP session matches, allow access
+                    return self.get_credentials(requested_user_email, oauth_client_key=oauth_client_key)
+
+            # Special case: Allow access if user has recently authenticated (for clients that don't send tokens)
+            # CRITICAL SECURITY: This is ONLY allowed in stdio mode, NEVER in OAuth 2.1 mode
+            requested_session_key = self._session_user_key(requested_user_email, oauth_client_key)
+            recent_auth_available = requested_session_key in self._sessions
+            if allow_recent_auth and not recent_auth_available and not oauth_client_key:
+                recent_auth_available = any(
+                    info.get("user_email") == requested_user_email for info in self._sessions.values()
+                )
+
+            if allow_recent_auth and recent_auth_available:
+                # Check transport mode to ensure this is only used in stdio
+                try:
+                    from auth.config import get_transport_mode
+
+                    transport_mode = get_transport_mode()
+                    if transport_mode != "stdio":
+                        logger.error(
+                            f"SECURITY: Attempted to use allow_recent_auth in {transport_mode} mode. "
+                            f"This is only allowed in stdio mode!"
+                        )
+                        return None
+                except Exception as e:
+                    logger.error(f"Failed to check transport mode: {e}")
+                    return None
+
+                logger.info(
+                    f"Allowing credential access for {requested_user_email} based on recent authentication "
+                    f"(stdio mode only - client not sending bearer token)"
+                )
+                return self.get_credentials(requested_user_email, oauth_client_key=oauth_client_key)
+
+            # No session or token info available - deny access for security
+            logger.warning(f"Credential access denied for {requested_user_email}: No valid session or token")
+            return None
+
+    def get_user_by_mcp_session(self, mcp_session_id: str) -> str | None:
+        """
+        Get user email by FastMCP session ID.
+
+        Args:
+            mcp_session_id: FastMCP session ID
+
+        Returns:
+            User email or None
+        """
+        with self._lock:
+            return self._mcp_session_mapping.get(mcp_session_id)
+
+    def get_client_by_mcp_session(self, mcp_session_id: str) -> str | None:
+        """Get OAuth client key by FastMCP session ID."""
+        with self._lock:
+            return self._mcp_session_client_mapping.get(mcp_session_id)
+
+    def get_session_info(self, user_email: str, oauth_client_key: str | None = None) -> dict[str, Any] | None:
+        """
+        Get complete session information including issuer.
+
+        Args:
+            user_email: User's email address
+
+        Returns:
+            Session information dictionary or None
+        """
+        with self._lock:
+            return self._sessions.get(self._session_user_key(user_email, oauth_client_key))
+
+    def remove_session(self, user_email: str, oauth_client_key: str | None = None):
+        """Remove session for a user."""
+        with self._lock:
+            removed_something = False
+
+            # Get session IDs from in-memory session if available
+            session_info = self._sessions.get(self._session_user_key(user_email, oauth_client_key), {})
+            mcp_session_id = session_info.get("mcp_session_id")
+            session_id = session_info.get("session_id")
+
+            # Remove from in-memory sessions
+            session_user_key = self._session_user_key(user_email, oauth_client_key)
+            if session_user_key in self._sessions:
+                del self._sessions[session_user_key]
+                removed_something = True
+            elif user_email in self._sessions:
+                # Legacy key cleanup.
+                del self._sessions[user_email]
+                removed_something = True
+
+            # Remove from MCP mapping - check both by session ID and by scanning for email
+            if mcp_session_id and mcp_session_id in self._mcp_session_mapping:
+                del self._mcp_session_mapping[mcp_session_id]
+                if mcp_session_id in self._mcp_session_client_mapping:
+                    del self._mcp_session_client_mapping[mcp_session_id]
+                if mcp_session_id in self._session_auth_binding:
+                    del self._session_auth_binding[mcp_session_id]
+                removed_something = True
+                logger.info(f"Removed MCP session mapping for {user_email}: {mcp_session_id}")
+            else:
+                # Scan mappings for this user email (handles post-restart case)
+                sessions_to_remove = [sid for sid, email in self._mcp_session_mapping.items() if email == user_email]
+                for sid in sessions_to_remove:
+                    del self._mcp_session_mapping[sid]
+                    if sid in self._mcp_session_client_mapping:
+                        del self._mcp_session_client_mapping[sid]
+                    if sid in self._session_auth_binding:
+                        del self._session_auth_binding[sid]
+                    removed_something = True
+                    logger.info(f"Removed MCP session mapping for {user_email}: {sid}")
+
+            # Remove OAuth session binding if exists
+            if session_id and session_id in self._session_auth_binding:
+                del self._session_auth_binding[session_id]
+                removed_something = True
+
+            # Also scan auth bindings for this user email
+            bindings_to_remove = [sid for sid, email in self._session_auth_binding.items() if email == user_email]
+            for sid in bindings_to_remove:
+                del self._session_auth_binding[sid]
+                removed_something = True
+
+            if removed_something:
+                logger.info(f"Removed OAuth 2.1 session for {user_email}")
+                # Persist the removal to disk
+                self._save_session_mappings_to_disk()
+            else:
+                logger.debug(f"No session found to remove for {user_email}")
+
+    def has_session(self, user_email: str, oauth_client_key: str | None = None) -> bool:
+        """Check if a user has an active session."""
+        with self._lock:
+            session_user_key = self._session_user_key(user_email, oauth_client_key)
+            if session_user_key in self._sessions:
+                return True
+            if oauth_client_key:
+                return False
+            return user_email in self._sessions
+
+    def has_mcp_session(self, mcp_session_id: str) -> bool:
+        """Check if an MCP session has an associated user session."""
+        with self._lock:
+            return mcp_session_id in self._mcp_session_mapping
+
+    def get_single_user_email(self) -> str | None:
+        """Return the sole authenticated user email when exactly one session exists."""
+        with self._lock:
+            if len(self._sessions) == 1:
+                only_session = next(iter(self._sessions.values()))
+                return only_session.get("user_email")
+            return None
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get store statistics."""
+        with self._lock:
+            users = sorted(
+                {
+                    user_email
+                    for info in self._sessions.values()
+                    if isinstance(user_email := info.get("user_email"), str) and user_email
+                }
+            )
+            return {
+                "total_sessions": len(self._sessions),
+                "users": users,
+                "mcp_session_mappings": len(self._mcp_session_mapping),
+                "mcp_sessions": list(self._mcp_session_mapping.keys()),
+            }
+
+
+# Global instance
+_global_store = OAuth21SessionStore()
+
+
+def get_oauth21_session_store() -> OAuth21SessionStore:
+    """Get the global OAuth 2.1 session store."""
+    return _global_store
+
+
+# =============================================================================
+# Google Credentials Bridge (absorbed from oauth21_google_bridge.py)
+# =============================================================================
+
+# Global auth provider instance (set during server initialization)
+_auth_provider = None
+
+
+def set_auth_provider(provider: Any) -> None:
+    """Set the global auth provider instance."""
+    global _auth_provider
+    _auth_provider = provider
+    logger.debug("OAuth 2.1 session store configured")
+
+
+def get_auth_provider() -> Any | None:
+    """Get the global auth provider instance."""
+    return _auth_provider
+
+
+def _resolve_client_credentials() -> tuple[str | None, str | None]:
+    """Resolve OAuth client credentials from the active provider or configuration."""
+    client_id: str | None = None
+    client_secret: str | None = None
+
+    if _auth_provider:
+        client_id = getattr(_auth_provider, "_upstream_client_id", None)
+        secret_obj = getattr(_auth_provider, "_upstream_client_secret", None)
+        if secret_obj is not None:
+            if hasattr(secret_obj, "get_secret_value"):
+                try:
+                    secret_callable: _SecretValueProtocol = secret_obj
+                    client_secret = secret_callable.get_secret_value()
+                except (TypeError, AttributeError) as exc:
+                    logger.debug(f"Failed to resolve client secret from provider: {exc}")
+                    client_secret = str(secret_obj)
+            elif isinstance(secret_obj, str):
+                client_secret = secret_obj
+
+    if not client_id or not client_secret:
+        try:
+            from auth.config import get_oauth_config
+
+            cfg = get_oauth_config()
+            client_id = client_id or cfg.client_id
+            client_secret = client_secret or cfg.client_secret
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(f"Failed to resolve client credentials from config: {exc}")
+
+    return client_id, client_secret
+
+
+def _build_credentials_from_provider(
+    access_token: AccessToken,
+) -> Credentials | None:
+    """Construct Google credentials from the provider cache."""
+    if not _auth_provider:
+        return None
+
+    access_entry = getattr(_auth_provider, "_access_tokens", {}).get(access_token.token)
+    if not access_entry:
+        access_entry = access_token
+
+    client_id, client_secret = _resolve_client_credentials()
+
+    refresh_token_value = getattr(_auth_provider, "_access_to_refresh", {}).get(access_token.token)
+    refresh_token_obj = None
+    if refresh_token_value:
+        refresh_token_obj = getattr(_auth_provider, "_refresh_tokens", {}).get(refresh_token_value)
+
+    expiry = None
+    expires_at = getattr(access_entry, "expires_at", None)
+    if expires_at:
+        try:
+            expiry_candidate = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+            expiry = _normalize_expiry_to_naive_utc(expiry_candidate)
+        except Exception:  # pragma: no cover - defensive
+            expiry = None
+
+    scopes = getattr(access_entry, "scopes", None)
+
+    return Credentials(
+        token=access_token.token,
+        refresh_token=refresh_token_obj.token if refresh_token_obj else None,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=scopes,
+        expiry=expiry,
+    )
+
+
+def ensure_session_from_access_token(
+    access_token: AccessToken,
+    user_email: str | None,
+    mcp_session_id: str | None = None,
+) -> Credentials | None:
+    """Ensure credentials derived from an access token are cached and returned."""
+
+    if not access_token:
+        return None
+
+    email = user_email
+    if not email and getattr(access_token, "claims", None):
+        email = access_token.claims.get("email")
+
+    credentials = _build_credentials_from_provider(access_token)
+    store_expiry: datetime | None = None
+
+    if credentials is None:
+        client_id, client_secret = _resolve_client_credentials()
+        expiry = None
+        expires_at = getattr(access_token, "expires_at", None)
+        if expires_at:
+            try:
+                expiry = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+            except Exception:  # pragma: no cover - defensive
+                expiry = None
+
+        normalized_expiry = _normalize_expiry_to_naive_utc(expiry)
+        credentials = Credentials(
+            token=access_token.token,
+            refresh_token=None,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=getattr(access_token, "scopes", None),
+            expiry=normalized_expiry,
+        )
+        store_expiry = expiry
+    else:
+        store_expiry = credentials.expiry
+
+    if email:
+        try:
+            oauth_client_key = None
+            try:
+                from auth.oauth_clients import resolve_oauth_client_for_user
+
+                oauth_client_key = resolve_oauth_client_for_user(email).client_key
+            except Exception:
+                oauth_client_key = None
+            store = get_oauth21_session_store()
+            token_uri = getattr(credentials, "token_uri", None) or "https://oauth2.googleapis.com/token"
+            store.store_session(
+                user_email=email,
+                oauth_client_key=oauth_client_key,
+                access_token=credentials.token,
+                refresh_token=credentials.refresh_token,
+                token_uri=token_uri,
+                client_id=credentials.client_id,
+                client_secret=credentials.client_secret,
+                scopes=credentials.scopes,
+                expiry=store_expiry,
+                session_id=f"google_{email}",
+                mcp_session_id=mcp_session_id,
+                issuer="https://accounts.google.com",
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(f"Failed to cache credentials for {email}: {exc}")
+
+    return credentials
+
+
+def get_credentials_from_token(access_token: str, user_email: str | None = None) -> Credentials | None:
+    """
+    Convert a bearer token to Google credentials.
+
+    Args:
+        access_token: The bearer token
+        user_email: Optional user email for session lookup
+
+    Returns:
+        Google Credentials object or None
+    """
+    try:
+        store = get_oauth21_session_store()
+
+        # If we have user_email, try to get credentials from store
+        if user_email:
+            oauth_client_key = None
+            try:
+                from auth.oauth_clients import resolve_oauth_client_for_user
+
+                oauth_client_key = resolve_oauth_client_for_user(user_email).client_key
+            except Exception:
+                oauth_client_key = None
+            credentials = store.get_credentials(user_email, oauth_client_key=oauth_client_key)
+            if credentials and credentials.token == access_token:
+                logger.debug(f"Found matching credentials from store for {user_email}")
+                return credentials
+
+        # If the FastMCP provider is managing tokens, sync from provider storage
+        if _auth_provider:
+            access_record = getattr(_auth_provider, "_access_tokens", {}).get(access_token)
+            if access_record:
+                logger.debug("Building credentials from FastMCP provider cache")
+                return ensure_session_from_access_token(access_record, user_email)
+
+        # Otherwise, create minimal credentials with just the access token
+        # Assume token is valid for 1 hour (typical for Google tokens)
+        expiry = _normalize_expiry_to_naive_utc(datetime.now(timezone.utc) + timedelta(hours=1))
+        client_id, client_secret = _resolve_client_credentials()
+
+        credentials = Credentials(
+            token=access_token,
+            refresh_token=None,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=None,
+            expiry=expiry,
+        )
+
+        logger.debug("Created fallback Google credentials from bearer token")
+        return credentials
+
+    except Exception as e:
+        logger.error(f"Failed to create Google credentials from token: {e}")
+        return None
+
+
+def store_token_session(token_response: dict, user_email: str, mcp_session_id: str | None = None) -> str:
+    """
+    Store a token response in the session store.
+
+    Args:
+        token_response: OAuth token response from Google
+        user_email: User's email address
+        mcp_session_id: Optional FastMCP session ID to map to this user
+
+    Returns:
+        Session ID
+    """
+    if not _auth_provider:
+        logger.error("Auth provider not configured")
+        return ""
+
+    try:
+        # Try to get FastMCP session ID from context if not provided
+        if not mcp_session_id:
+            try:
+                from core.context import get_fastmcp_session_id
+
+                mcp_session_id = get_fastmcp_session_id()
+                if mcp_session_id:
+                    logger.debug(f"Got FastMCP session ID from context: {mcp_session_id}")
+            except Exception as e:
+                logger.debug(f"Could not get FastMCP session from context: {e}")
+
+        # Store session in OAuth21SessionStore
+        store = get_oauth21_session_store()
+
+        session_id = f"google_{user_email}"
+        client_id, client_secret = _resolve_client_credentials()
+        scopes = token_response.get("scope", "")
+        scopes_list = scopes.split() if scopes else None
+        expiry = datetime.now(timezone.utc) + timedelta(seconds=token_response.get("expires_in", 3600))
+
+        access_token_str = token_response.get("access_token")
+        if not access_token_str:
+            raise ValueError("Token response missing access_token")
+        store.store_session(
+            user_email=user_email,
+            access_token=access_token_str,
+            refresh_token=token_response.get("refresh_token"),
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=scopes_list,
+            expiry=expiry,
+            session_id=session_id,
+            mcp_session_id=mcp_session_id,
+            issuer="https://accounts.google.com",
+        )
+
+        if mcp_session_id:
+            logger.info(f"Stored token session for {user_email} with MCP session {mcp_session_id}")
+        else:
+            logger.info(f"Stored token session for {user_email}")
+
+        return session_id
+
+    except Exception as e:
+        logger.error(f"Failed to store token session: {e}")
+        return ""

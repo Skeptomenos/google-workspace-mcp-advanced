@@ -1,0 +1,794 @@
+"""
+Google Docs Writing Tools
+
+This module provides MCP tools for creating and modifying Google Docs content.
+"""
+
+import asyncio
+import logging
+from typing import Any
+
+from auth.service_decorator import require_google_service
+from core.server import server
+from core.utils import handle_http_errors
+from gdocs.docs_helpers import (
+    create_delete_range_request,
+    create_find_replace_request,
+    create_format_text_request,
+    create_insert_text_request,
+)
+from gdocs.managers import (
+    BatchOperationManager,
+    HeaderFooterManager,
+    ValidationManager,
+)
+from gdocs.markdown_parser import MarkdownToDocsConverter
+from gdrive.drive_helpers import resolve_file_id_or_alias
+
+logger = logging.getLogger(__name__)
+
+
+def _validate_markdown_modes(checklist_mode: str, mention_mode: str) -> str | None:
+    """Validate markdown conversion mode inputs."""
+    if checklist_mode not in {"unicode", "native"}:
+        return "Error: checklist_mode must be one of: unicode, native."
+    if mention_mode not in {"text", "person_chip"}:
+        return "Error: mention_mode must be one of: text, person_chip."
+    return None
+
+
+def _partition_markdown_requests(
+    requests: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Partition markdown conversion requests into four execution phases:
+    1) base text/style/bullet requests
+    2) person mention replacements (delete+insertPerson)
+    3) inline image placeholder replacements (delete+insertInlineImage)
+    4) table placeholder replacements (delete+insertTable)
+
+    This keeps structural placeholder replacement logic centralized so
+    `create_doc` and `insert_markdown` stay behaviorally aligned.
+    """
+    base_requests: list[dict[str, Any]] = []
+    mention_phase_requests: list[dict[str, Any]] = []
+    image_phase_requests: list[dict[str, Any]] = []
+    table_phase_requests: list[dict[str, Any]] = []
+
+    index = 0
+    while index < len(requests):
+        request = requests[index]
+
+        # Keep delete+image pairs together for phase 2.
+        if "deleteContentRange" in request and index + 1 < len(requests):
+            next_request = requests[index + 1]
+            if "insertPerson" in next_request:
+                mention_phase_requests.append(request)
+                mention_phase_requests.append(next_request)
+                index += 2
+                continue
+            if "insertInlineImage" in next_request:
+                image_phase_requests.append(request)
+                image_phase_requests.append(next_request)
+                index += 2
+                continue
+            if "insertTable" in next_request:
+                table_phase_requests.append(request)
+                table_phase_requests.append(next_request)
+                index += 2
+                continue
+
+        if "insertPerson" in request:
+            mention_phase_requests.append(request)
+        elif "insertInlineImage" in request:
+            image_phase_requests.append(request)
+        elif "insertTable" in request:
+            table_phase_requests.append(request)
+        else:
+            base_requests.append(request)
+        index += 1
+
+    return base_requests, mention_phase_requests, image_phase_requests, table_phase_requests
+
+
+async def _execute_person_mention_phase(
+    service: Any,
+    document_id: str,
+    mention_phase_requests: list[dict[str, Any]],
+) -> list[str]:
+    """
+    Execute mention replacement pairs with deterministic fallback.
+
+    Each mention replacement pair is executed in its own batchUpdate call:
+    1) delete literal @user@example.com range
+    2) insertPerson at the same index
+
+    If a pair fails, the original literal text remains unchanged because the
+    call is atomic, and we record a fallback note for response visibility.
+    """
+    if not mention_phase_requests:
+        return []
+
+    mention_pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    index = 0
+    while index < len(mention_phase_requests):
+        request = mention_phase_requests[index]
+        if "deleteContentRange" in request and index + 1 < len(mention_phase_requests):
+            next_request = mention_phase_requests[index + 1]
+            if "insertPerson" in next_request:
+                mention_pairs.append((request, next_request))
+                index += 2
+                continue
+        index += 1
+
+    def _pair_start(item: tuple[dict[str, Any], dict[str, Any]]) -> int:
+        return int(item[0]["deleteContentRange"]["range"]["startIndex"])
+
+    fallback_mentions: list[str] = []
+    for delete_request, insert_person_request in sorted(mention_pairs, key=_pair_start, reverse=True):
+        person_props = insert_person_request.get("insertPerson", {}).get("personProperties", {})
+        email = str(person_props.get("email", "")).strip()
+        mention_token = f"@{email}" if email else "@unknown"
+        try:
+            await asyncio.to_thread(
+                service.documents()
+                .batchUpdate(documentId=document_id, body={"requests": [delete_request, insert_person_request]})
+                .execute
+            )
+        except Exception:
+            # Keep literal mention text when insertPerson cannot be applied.
+            fallback_mentions.append(mention_token)
+
+    return fallback_mentions
+
+
+@server.tool()
+@handle_http_errors("create_doc", service_type="docs")
+@require_google_service("docs", "docs_write")
+async def create_doc(
+    service: Any,
+    user_google_email: str,
+    title: str,
+    content: str = "",
+    parse_markdown: bool = True,
+    checklist_mode: str = "unicode",
+    mention_mode: str = "text",
+    dry_run: bool = True,
+) -> str:
+    """
+    Creates a new Google Doc and optionally inserts initial content.
+
+    When `parse_markdown=True` (default), the content is parsed as Markdown and
+    converted to native Google Docs formatting (headings, bold, italic, lists,
+    links, code blocks, blockquotes). Set `parse_markdown=False` to insert
+    content as plain text without any formatting.
+
+    Args:
+        user_google_email: User's Google email address.
+        title: The title of the new document.
+        content: Optional initial content. Interpreted as Markdown by default.
+        parse_markdown: If True (default), parse content as Markdown and apply
+                        formatting. If False, insert content as plain text.
+        checklist_mode: Checklist rendering mode for markdown task lists:
+                        `unicode` (default) or `native`.
+        mention_mode: Mention rendering mode for markdown mentions:
+                      `text` (default) or `person_chip`.
+        dry_run: When True (default), preview create/update actions without executing them.
+
+    Returns:
+        str: Confirmation message with document ID and link.
+
+    Examples:
+        # Create doc with Markdown content (default behavior)
+        create_doc(title="My Doc", content="# Heading\\n\\n**Bold** text")
+
+        # Create doc with native checklist bullets
+        create_doc(title="Checklist Doc", content="- [ ] One\\n- [x] Two", checklist_mode="native")
+
+        # Create doc with plain text (no Markdown parsing)
+        create_doc(title="Plain Doc", content="# This is literal text", parse_markdown=False)
+    """
+    logger.info(
+        f"[create_doc] Invoked. Email: '{user_google_email}', Title='{title}', "
+        f"parse_markdown={parse_markdown}, checklist_mode={checklist_mode}, mention_mode={mention_mode}, "
+        f"dry_run={dry_run}, content_len={len(content)}"
+    )
+
+    mode_error = _validate_markdown_modes(checklist_mode, mention_mode)
+    if mode_error:
+        return mode_error
+
+    if dry_run:
+        if not content:
+            return f"DRY RUN: Would create empty Google Doc '{title}' for {user_google_email}."
+
+        if parse_markdown:
+            converter = MarkdownToDocsConverter(checklist_mode=checklist_mode, mention_mode=mention_mode)
+            requests = converter.convert(content, start_index=1)
+            return (
+                f"DRY RUN: Would create Google Doc '{title}' for {user_google_email} with Markdown content "
+                f"({len(content)} characters), apply {len(requests)} request(s), and populate "
+                f"{len(converter.pending_tables)} table(s). Mentions mode={mention_mode}, checklist mode={checklist_mode}."
+            )
+
+        return (
+            f"DRY RUN: Would create Google Doc '{title}' for {user_google_email} with plain-text content "
+            f"({len(content)} characters)."
+        )
+
+    doc = await asyncio.to_thread(service.documents().create(body={"title": title}).execute)
+    doc_id = doc.get("documentId")
+    fallback_mentions: list[str] = []
+
+    if content:
+        if parse_markdown:
+            converter = MarkdownToDocsConverter(checklist_mode=checklist_mode, mention_mode=mention_mode)
+            requests = converter.convert(content, start_index=1)
+            logger.debug(f"[create_doc] Markdown converter generated {len(requests)} request(s)")
+            base_requests, mention_phase_requests, image_phase_requests, table_phase_requests = (
+                _partition_markdown_requests(requests)
+            )
+
+            # Phase 1: send base text/style requests in a single batch.
+            # The createParagraphBullets request uses leading TAB characters to determine
+            # nesting levels. If we split into multiple calls, the TABs are inserted first,
+            # then the bullet request runs with stale indices after TABs have shifted positions.
+            # See: specs/FIX_LIST_NESTING.md for details on the TAB-based nesting approach.
+            if base_requests:
+                await asyncio.to_thread(
+                    service.documents().batchUpdate(documentId=doc_id, body={"requests": base_requests}).execute
+                )
+
+            # Phase 2: Person mention replacement with deterministic fallback.
+            fallback_mentions = await _execute_person_mention_phase(service, doc_id, mention_phase_requests)
+
+            # Phase 3: Inline image replacement.
+            # Image requests are emitted from markdown conversion as placeholder delete+insert
+            # operations. Running them in a dedicated batchUpdate avoids API drops observed
+            # when image operations are mixed with large structural batches.
+            if image_phase_requests:
+                await asyncio.to_thread(
+                    service.documents().batchUpdate(documentId=doc_id, body={"requests": image_phase_requests}).execute
+                )
+
+            # Phase 4: Table placeholder replacement.
+            # Table insertions expand document indices, so we apply them only after
+            # text/style/image phases complete.
+            if table_phase_requests:
+                await asyncio.to_thread(
+                    service.documents().batchUpdate(documentId=doc_id, body={"requests": table_phase_requests}).execute
+                )
+
+            # Phase 5: Populate table cells (requires document inspection for actual indices).
+            # Tables are created empty in Phase 3. Cell population needs a fresh read of the
+            # document to find actual cell paragraph positions.
+            if converter.pending_tables:
+                from gdocs.managers.table_operation_manager import TableOperationManager
+
+                table_mgr = TableOperationManager(service)
+                population_failures: list[str] = []
+                for table_index, (table_data, bold_headers) in enumerate(converter.pending_tables):
+                    expected_cells = sum(1 for row in table_data for cell in row if cell)
+                    populated_cells = await table_mgr._populate_table_cells(
+                        doc_id,
+                        table_data,
+                        bold_headers,
+                        table_index=table_index,
+                    )
+                    if populated_cells != expected_cells:
+                        population_failures.append(
+                            f"table {table_index}: populated {populated_cells}/{expected_cells} non-empty cells"
+                        )
+
+                if population_failures:
+                    failure_msg = "; ".join(population_failures)
+                    raise RuntimeError(
+                        f"Document '{doc_id}' created but markdown table population was incomplete ({failure_msg})."
+                    )
+            if fallback_mentions:
+                logger.info(
+                    "[create_doc] Mention fallback applied for %d token(s): %s",
+                    len(fallback_mentions),
+                    ", ".join(fallback_mentions),
+                )
+        else:
+            requests = [{"insertText": {"location": {"index": 1}, "text": content}}]
+            await asyncio.to_thread(
+                service.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute
+            )
+
+    link = f"https://docs.google.com/document/d/{doc_id}/edit"
+    mode_info = "with Markdown formatting" if (content and parse_markdown) else "with plain text" if content else ""
+    msg = f"Created Google Doc '{title}' (ID: {doc_id}) {mode_info}. Link: {link}".strip()
+    if content and parse_markdown and fallback_mentions:
+        msg += " Mention fallback kept literal tokens for: " + ", ".join(fallback_mentions)
+    logger.info(f"Successfully created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}. Link: {link}")
+    return msg
+
+
+@server.tool()
+@handle_http_errors("modify_doc_text", service_type="docs")
+@require_google_service("docs", "docs_write")
+async def modify_doc_text(
+    service: Any,
+    user_google_email: str,
+    document_id: str,
+    start_index: int,
+    end_index: int | None = None,
+    text: str | None = None,
+    bold: bool | None = None,
+    italic: bool | None = None,
+    underline: bool | None = None,
+    font_size: int | None = None,
+    font_family: str | None = None,
+    text_color: str | None = None,
+    background_color: str | None = None,
+    dry_run: bool = True,
+) -> str:
+    """
+    Modifies text in a Google Doc - can insert/replace text and/or apply formatting in a single operation.
+
+    Args:
+        user_google_email: User's Google email address
+        document_id: ID of the document to update
+        start_index: Start position for operation (0-based)
+        end_index: End position for text replacement/formatting (if not provided with text, text is inserted)
+        text: New text to insert or replace with (optional - can format existing text without changing it)
+        bold: Whether to make text bold (True/False/None to leave unchanged)
+        italic: Whether to make text italic (True/False/None to leave unchanged)
+        underline: Whether to underline text (True/False/None to leave unchanged)
+        font_size: Font size in points
+        font_family: Font family name (e.g., "Arial", "Times New Roman")
+        text_color: Foreground text color (#RRGGBB)
+        background_color: Background/highlight color (#RRGGBB)
+        dry_run: When True (default), return planned mutations without executing them
+
+    Returns:
+        str: Confirmation message with operation details
+    """
+    logger.info(
+        f"[modify_doc_text] Doc={document_id}, start={start_index}, end={end_index}, text={text is not None}, "
+        f"formatting={any([bold, italic, underline, font_size, font_family, text_color, background_color])}"
+    )
+
+    # Resolve alias (A-Z) to actual file ID if applicable
+    document_id = resolve_file_id_or_alias(document_id)
+
+    validator = ValidationManager()
+
+    is_valid, error_msg = validator.validate_document_id(document_id)
+    if not is_valid:
+        return f"Error: {error_msg}"
+
+    if text is None and not any(
+        [
+            bold is not None,
+            italic is not None,
+            underline is not None,
+            font_size,
+            font_family,
+            text_color,
+            background_color,
+        ]
+    ):
+        return "Error: Must provide either 'text' to insert/replace, or formatting parameters (bold, italic, underline, font_size, font_family, text_color, background_color)."
+
+    if any(
+        [
+            bold is not None,
+            italic is not None,
+            underline is not None,
+            font_size,
+            font_family,
+            text_color,
+            background_color,
+        ]
+    ):
+        is_valid, error_msg = validator.validate_text_formatting_params(
+            bold,
+            italic,
+            underline,
+            font_size,
+            font_family,
+            text_color,
+            background_color,
+        )
+        if not is_valid:
+            return f"Error: {error_msg}"
+
+        if end_index is None:
+            return "Error: 'end_index' is required when applying formatting."
+
+        is_valid, error_msg = validator.validate_index_range(start_index, end_index)
+        if not is_valid:
+            return f"Error: {error_msg}"
+
+    requests = []
+    operations = []
+
+    if text is not None:
+        if end_index is not None and end_index > start_index:
+            if start_index == 0:
+                requests.append(create_insert_text_request(1, text))
+                adjusted_end = end_index + len(text)
+                requests.append(create_delete_range_request(1 + len(text), adjusted_end))
+                operations.append(f"Replaced text from index {start_index} to {end_index}")
+            else:
+                requests.extend(
+                    [
+                        create_delete_range_request(start_index, end_index),
+                        create_insert_text_request(start_index, text),
+                    ]
+                )
+                operations.append(f"Replaced text from index {start_index} to {end_index}")
+        else:
+            actual_index = 1 if start_index == 0 else start_index
+            requests.append(create_insert_text_request(actual_index, text))
+            operations.append(f"Inserted text at index {start_index}")
+
+    if any(
+        [
+            bold is not None,
+            italic is not None,
+            underline is not None,
+            font_size,
+            font_family,
+            text_color,
+            background_color,
+        ]
+    ):
+        format_start = start_index
+        format_end = end_index
+
+        if text is not None:
+            if end_index is not None and end_index > start_index:
+                format_end = start_index + len(text)
+            else:
+                actual_index = 1 if start_index == 0 else start_index
+                format_start = actual_index
+                format_end = actual_index + len(text)
+
+        if format_start == 0:
+            format_start = 1
+        if format_end is None or format_end <= format_start:
+            format_end = format_start + 1
+
+        format_request = create_format_text_request(
+            format_start,
+            format_end,
+            bold,
+            italic,
+            underline,
+            font_size,
+            font_family,
+            text_color,
+            background_color,
+        )
+        if format_request:
+            requests.append(format_request)
+
+        format_details = []
+        if bold is not None:
+            format_details.append(f"bold={bold}")
+        if italic is not None:
+            format_details.append(f"italic={italic}")
+        if underline is not None:
+            format_details.append(f"underline={underline}")
+        if font_size:
+            format_details.append(f"font_size={font_size}")
+        if font_family:
+            format_details.append(f"font_family={font_family}")
+        if text_color:
+            format_details.append(f"text_color={text_color}")
+        if background_color:
+            format_details.append(f"background_color={background_color}")
+
+        operations.append(f"Applied formatting ({', '.join(format_details)}) to range {format_start}-{format_end}")
+
+    operation_summary = "; ".join(operations)
+    link = f"https://docs.google.com/document/d/{document_id}/edit"
+
+    if dry_run:
+        return (
+            f"DRY RUN: Would apply {len(requests)} request(s) to document {document_id} "
+            f"for {user_google_email}. Planned changes: {operation_summary}. Link: {link}"
+        )
+
+    await asyncio.to_thread(
+        service.documents().batchUpdate(documentId=document_id, body={"requests": requests}).execute
+    )
+
+    text_info = f" Text length: {len(text)} characters." if text else ""
+    return f"{operation_summary} in document {document_id}.{text_info} Link: {link}"
+
+
+@server.tool()
+@handle_http_errors("find_and_replace_doc", service_type="docs")
+@require_google_service("docs", "docs_write")
+async def find_and_replace_doc(
+    service: Any,
+    user_google_email: str,
+    document_id: str,
+    find_text: str,
+    replace_text: str,
+    match_case: bool = False,
+    dry_run: bool = True,
+) -> str:
+    """
+    Finds and replaces text throughout a Google Doc.
+
+    Args:
+        user_google_email: User's Google email address
+        document_id: ID of the document to update
+        find_text: Text to search for
+        replace_text: Text to replace with
+        match_case: Whether to match case exactly
+        dry_run: When True (default), return planned mutation without executing it
+
+    Returns:
+        str: Confirmation message with replacement count
+    """
+    logger.info(f"[find_and_replace_doc] Doc={document_id}, find='{find_text}', replace='{replace_text}'")
+
+    # Resolve alias (A-Z) to actual file ID if applicable
+    document_id = resolve_file_id_or_alias(document_id)
+
+    requests = [create_find_replace_request(find_text, replace_text, match_case)]
+
+    if dry_run:
+        return (
+            f"DRY RUN: Would replace occurrences of '{find_text}' with '{replace_text}' in document {document_id} "
+            f"for {user_google_email} (match_case={match_case})."
+        )
+
+    result = await asyncio.to_thread(
+        service.documents().batchUpdate(documentId=document_id, body={"requests": requests}).execute
+    )
+
+    replacements = 0
+    if "replies" in result and result["replies"]:
+        reply = result["replies"][0]
+        if "replaceAllText" in reply:
+            replacements = reply["replaceAllText"].get("occurrencesChanged", 0)
+
+    link = f"https://docs.google.com/document/d/{document_id}/edit"
+    return f"Replaced {replacements} occurrence(s) of '{find_text}' with '{replace_text}' in document {document_id}. Link: {link}"
+
+
+@server.tool()
+@handle_http_errors("update_doc_headers_footers", service_type="docs")
+@require_google_service("docs", "docs_write")
+async def update_doc_headers_footers(
+    service: Any,
+    user_google_email: str,
+    document_id: str,
+    section_type: str,
+    content: str,
+    header_footer_type: str = "DEFAULT",
+    dry_run: bool = True,
+) -> str:
+    """
+    Updates headers or footers in a Google Doc.
+
+    Args:
+        user_google_email: User's Google email address
+        document_id: ID of the document to update
+        section_type: Type of section to update ("header" or "footer")
+        content: Text content for the header/footer
+        header_footer_type: Type of header/footer ("DEFAULT", "FIRST_PAGE_ONLY", "EVEN_PAGE")
+        dry_run: When True (default), return planned mutation without executing it
+
+    Returns:
+        str: Confirmation message with update details
+    """
+    logger.info(f"[update_doc_headers_footers] Doc={document_id}, type={section_type}")
+
+    # Resolve alias (A-Z) to actual file ID if applicable
+    document_id = resolve_file_id_or_alias(document_id)
+
+    validator = ValidationManager()
+
+    is_valid, error_msg = validator.validate_document_id(document_id)
+    if not is_valid:
+        return f"Error: {error_msg}"
+
+    is_valid, error_msg = validator.validate_header_footer_params(section_type, header_footer_type)
+    if not is_valid:
+        return f"Error: {error_msg}"
+
+    is_valid, error_msg = validator.validate_text_content(content)
+    if not is_valid:
+        return f"Error: {error_msg}"
+
+    if dry_run:
+        return (
+            f"DRY RUN: Would update {section_type} ({header_footer_type}) for document {document_id} "
+            f"for {user_google_email}. Content length: {len(content)}."
+        )
+
+    header_footer_manager = HeaderFooterManager(service)
+
+    success, message = await header_footer_manager.update_header_footer_content(
+        document_id, section_type, content, header_footer_type
+    )
+
+    if success:
+        link = f"https://docs.google.com/document/d/{document_id}/edit"
+        return f"{message}. Link: {link}"
+    else:
+        return f"Error: {message}"
+
+
+@server.tool()
+@handle_http_errors("batch_update_doc", service_type="docs")
+@require_google_service("docs", "docs_write")
+async def batch_update_doc(
+    service: Any,
+    user_google_email: str,
+    document_id: str,
+    operations: list[dict[str, Any]],
+    dry_run: bool = True,
+) -> str:
+    """
+    Executes multiple document operations in a single atomic batch update.
+
+    Args:
+        user_google_email: User's Google email address
+        document_id: ID of the document to update
+        operations: List of operation dictionaries. Each operation should contain:
+                   - type: Operation type ('insert_text', 'delete_text', 'replace_text',
+                     'format_text', 'insert_table', 'insert_page_break', 'insert_markdown')
+                   - Additional parameters specific to each operation type
+        dry_run: When True (default), return planned batch summary without executing it
+
+    Example operations:
+        [
+            {"type": "insert_text", "index": 1, "text": "Hello World"},
+            {"type": "format_text", "start_index": 1, "end_index": 12, "bold": true},
+            {"type": "insert_table", "index": 20, "rows": 2, "columns": 3},
+            {"type": "insert_markdown", "markdown_text": "# Heading\\n\\n**Bold** text", "index": 1}
+        ]
+
+    Returns:
+        str: Confirmation message with batch operation results
+    """
+    logger.debug(f"[batch_update_doc] Doc={document_id}, operations={len(operations)}")
+
+    # Resolve alias (A-Z) to actual file ID if applicable
+    document_id = resolve_file_id_or_alias(document_id)
+
+    validator = ValidationManager()
+
+    is_valid, error_msg = validator.validate_document_id(document_id)
+    if not is_valid:
+        return f"Error: {error_msg}"
+
+    is_valid, error_msg = validator.validate_batch_operations(operations)
+    if not is_valid:
+        return f"Error: {error_msg}"
+
+    if dry_run:
+        return (
+            f"DRY RUN: Would execute {len(operations)} batch operation(s) on document {document_id} "
+            f"for {user_google_email}."
+        )
+
+    batch_manager = BatchOperationManager(service)
+
+    success, message, metadata = await batch_manager.execute_batch_operations(document_id, operations)
+
+    if success:
+        link = f"https://docs.google.com/document/d/{document_id}/edit"
+        replies_count = metadata.get("replies_count", 0)
+        return f"{message} on document {document_id}. API replies: {replies_count}. Link: {link}"
+    else:
+        return f"Error: {message}"
+
+
+@server.tool()
+@handle_http_errors("insert_markdown", service_type="docs")
+@require_google_service("docs", "docs_write")
+async def insert_markdown(
+    service: Any,
+    user_google_email: str,
+    document_id: str,
+    markdown_text: str,
+    index: int = 1,
+    checklist_mode: str = "unicode",
+    mention_mode: str = "text",
+    dry_run: bool = True,
+) -> str:
+    """
+    Insert Markdown-formatted content into a Google Doc.
+
+    Converts Markdown syntax (headings, bold, italic, lists, links, code blocks,
+    blockquotes) into native Google Docs formatting via batchUpdate requests.
+
+    Args:
+        user_google_email: User's Google email address.
+        document_id: ID of the document to update (supports A-Z aliases from search).
+        markdown_text: Markdown string to convert and insert.
+        index: Document index to start insertion at (1-based, default: 1).
+               Index 1 is the start of the document body.
+        checklist_mode: Checklist rendering mode for markdown task lists:
+                        `unicode` (default) or `native`.
+        mention_mode: Mention rendering mode for markdown mentions:
+                      `text` (default) or `person_chip`.
+        dry_run: When True (default), return planned mutation without executing it
+
+    Returns:
+        str: Confirmation message with document link and request count.
+
+    Example:
+        insert_markdown(
+            document_id="abc123",
+            markdown_text="# Welcome\n\nThis is **bold** and *italic* text.\n\n- Item 1\n- Item 2"
+        )
+    """
+    logger.info(
+        f"[insert_markdown] Doc={document_id}, markdown_len={len(markdown_text)}, start_index={index}, "
+        f"checklist_mode={checklist_mode}, mention_mode={mention_mode}"
+    )
+
+    # Resolve alias (A-Z) to actual file ID if applicable
+    document_id = resolve_file_id_or_alias(document_id)
+
+    validator = ValidationManager()
+
+    is_valid, error_msg = validator.validate_document_id(document_id)
+    if not is_valid:
+        return f"Error: {error_msg}"
+
+    if not markdown_text.strip():
+        return "Error: markdown_text cannot be empty."
+
+    if index < 1:
+        return "Error: index must be at least 1 (document body starts at index 1)."
+
+    mode_error = _validate_markdown_modes(checklist_mode, mention_mode)
+    if mode_error:
+        return mode_error
+
+    # Convert Markdown to Google Docs API requests
+    converter = MarkdownToDocsConverter(checklist_mode=checklist_mode, mention_mode=mention_mode)
+    requests = converter.convert(markdown_text, start_index=index)
+    base_requests, mention_phase_requests, image_phase_requests, table_phase_requests = _partition_markdown_requests(
+        requests
+    )
+
+    if not requests:
+        return "Error: Markdown conversion produced no requests. Check markdown_text content."
+
+    if dry_run:
+        return (
+            f"DRY RUN: Would insert Markdown into document {document_id} for {user_google_email} at index {index}. "
+            f"Generated {len(requests)} API request(s). Mentions mode={mention_mode}, checklist mode={checklist_mode}."
+        )
+
+    # Execute markdown requests in shared phases to keep index behavior
+    # consistent with create_doc.
+    fallback_mentions: list[str] = []
+    if base_requests:
+        await asyncio.to_thread(
+            service.documents().batchUpdate(documentId=document_id, body={"requests": base_requests}).execute
+        )
+
+    fallback_mentions = await _execute_person_mention_phase(service, document_id, mention_phase_requests)
+
+    if image_phase_requests:
+        await asyncio.to_thread(
+            service.documents().batchUpdate(documentId=document_id, body={"requests": image_phase_requests}).execute
+        )
+
+    if table_phase_requests:
+        await asyncio.to_thread(
+            service.documents().batchUpdate(documentId=document_id, body={"requests": table_phase_requests}).execute
+        )
+
+    link = f"https://docs.google.com/document/d/{document_id}/edit"
+    message = (
+        f"Inserted Markdown content into document {document_id}. Generated {len(requests)} API request(s). Link: {link}"
+    )
+    if fallback_mentions:
+        message += " Mention fallback kept literal tokens for: " + ", ".join(fallback_mentions)
+    return message

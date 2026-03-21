@@ -1,0 +1,281 @@
+"""Server managers for search caching and file synchronization.
+
+This module provides typed data structures and managers for:
+- SearchManager: Caches search results with aliases (A, B, C...)
+- SyncManager: Tracks links between local files and Google Drive
+"""
+
+import json
+import os
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from auth.config import get_sync_map_path
+
+# ============================================================================
+# Data Classes
+# ============================================================================
+
+
+@dataclass
+class CachedFile:
+    """A file cached from search results.
+
+    Attributes:
+        id: The Google Drive file ID.
+        name: The file name.
+        alias: Single-letter alias (A-Z) for quick reference.
+        mime_type: The MIME type of the file.
+        snippet: Preview text from the file content.
+        score: Relevance score (0-100).
+    """
+
+    id: str
+    name: str
+    alias: str
+    mime_type: str = ""
+    snippet: str = ""
+    score: int = 0
+
+    def __repr__(self) -> str:
+        return f"CachedFile(alias={self.alias!r}, name={self.name!r}, id={self.id!r})"
+
+
+@dataclass
+class SyncLink:
+    """Link between a local file and a Google Drive file.
+
+    Attributes:
+        file_id: The Google Drive file ID.
+        last_synced_version: The version number at last sync.
+    """
+
+    file_id: str
+    last_synced_version: int = 0
+
+    def __repr__(self) -> str:
+        return f"SyncLink(file_id={self.file_id!r}, version={self.last_synced_version})"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {"id": self.file_id, "last_synced_version": self.last_synced_version}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SyncLink":
+        """Create from dictionary (loaded from JSON)."""
+        return cls(file_id=data.get("id", ""), last_synced_version=data.get("last_synced_version", 0))
+
+
+# ============================================================================
+# Search Manager
+# ============================================================================
+
+
+class SearchManager:
+    """Manages search result caching and alias resolution.
+
+    Assigns single-letter aliases (A-Z) to search results for quick reference
+    in subsequent commands. Thread-safe for concurrent access.
+    """
+
+    def __init__(self) -> None:
+        self._cache: dict[str, CachedFile] = {}
+        self.search_cache: dict[str, str] = {}
+        self._lock = threading.RLock()
+
+    def cache_results(self, files: list[dict]) -> list[dict]:
+        """Cache search results and assign aliases (A, B, C...)."""
+        with self._lock:
+            self._cache.clear()
+            self.search_cache.clear()
+            letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            ranked_results = []
+
+            for i, file in enumerate(files):
+                if i < len(letters):
+                    alias = letters[i]
+                    cached = CachedFile(
+                        id=file["id"],
+                        name=file.get("name", "Untitled"),
+                        alias=alias,
+                        mime_type=file.get("mimeType", ""),
+                        snippet=file.get("snippet", ""),
+                        score=file.get("score", 0),
+                    )
+                    self._cache[alias] = cached
+                    self.search_cache[alias] = file["id"]
+                    file["alias"] = alias
+                    ranked_results.append(file)
+
+            return ranked_results
+
+    def resolve_alias(self, query: str) -> str:
+        """Resolve a single-letter alias to a file_id."""
+        with self._lock:
+            if len(query) == 1 and query.upper() in self.search_cache:
+                return self.search_cache[query.upper()]
+            return query
+
+    def get_cached_file(self, alias: str) -> CachedFile | None:
+        """Get the full cached file info by alias."""
+        with self._lock:
+            return self._cache.get(alias.upper())
+
+    def clear(self) -> None:
+        """Clear all cached results."""
+        with self._lock:
+            self._cache.clear()
+            self.search_cache.clear()
+
+
+# ============================================================================
+# Sync Manager
+# ============================================================================
+
+
+def _default_sync_map_path() -> Path:
+    """Return the default path for the sync map file.
+
+    This is a fallback used when no explicit path is provided via constructor
+    injection. The composition root (core/server.py or core/container.py)
+    should inject the actual path from auth.config.get_sync_map_path().
+    """
+    return Path(get_sync_map_path())
+
+
+class SyncManager:
+    """Manages local file to Google Drive ID mappings for synchronization.
+
+    Persists links to gdrive_map.json for cross-session persistence.
+    Thread-safe for concurrent access.
+
+    Args:
+        sync_map_path: Path to the sync map file. If None, uses default
+            (~/.config/google-workspace-mcp-advanced/sync_map.json). Composition roots
+            should inject this via auth.config.get_sync_map_path().
+    """
+
+    def __init__(self, sync_map_path: Path | str | None = None) -> None:
+        self._sync_map_path = Path(sync_map_path) if sync_map_path else None
+        self._links: dict[str, SyncLink] = {}
+        self._lock = threading.RLock()
+        self.file_map: dict[str, dict] = {}
+        self._load_map()
+
+    @property
+    def sync_map_path(self) -> Path:
+        if self._sync_map_path is not None:
+            return self._sync_map_path
+        return _default_sync_map_path()
+
+    def _load_map(self) -> None:
+        with self._lock:
+            if self.sync_map_path.exists():
+                with open(self.sync_map_path) as f:
+                    data = json.load(f)
+                    for path, info in data.items():
+                        self._links[path] = SyncLink.from_dict(info)
+                        self.file_map[path] = info
+            else:
+                self._links = {}
+                self.file_map = {}
+
+    def _save_map(self) -> None:
+        with self._lock:
+            map_path = self.sync_map_path
+            map_path.parent.mkdir(parents=True, exist_ok=True)
+            self.file_map = {path: link.to_dict() for path, link in self._links.items()}
+            with open(map_path, "w") as f:
+                json.dump(self.file_map, f, indent=2)
+
+    def link_file(self, local_path: str, file_id: str, version: int = 0) -> str:
+        """Link a local file to a Google Drive file ID.
+
+        Args:
+            local_path: Path to the local file.
+            file_id: Google Drive file ID.
+            version: Initial synced version (default 0).
+
+        Returns:
+            Success message.
+        """
+        abs_path = os.path.abspath(local_path)
+        link = SyncLink(file_id=file_id, last_synced_version=version)
+        with self._lock:
+            self._links[abs_path] = link
+            self.file_map[abs_path] = link.to_dict()
+        self._save_map()
+        return f"Linked {local_path} -> {file_id}"
+
+    def get_link(self, local_path: str) -> dict | None:
+        """Get the Drive link info for a local file.
+
+        Args:
+            local_path: Path to the local file.
+
+        Returns:
+            Link info dict or None (backward compatible format).
+        """
+        abs_path = os.path.abspath(local_path)
+        with self._lock:
+            link = self._links.get(abs_path)
+            if link:
+                return link.to_dict()
+            return self.file_map.get(abs_path)
+
+    def get_sync_link(self, local_path: str) -> SyncLink | None:
+        """Get the typed SyncLink for a local file.
+
+        Args:
+            local_path: Path to the local file.
+
+        Returns:
+            SyncLink or None.
+        """
+        abs_path = os.path.abspath(local_path)
+        with self._lock:
+            return self._links.get(abs_path)
+
+    def update_version(self, local_path: str, version: int) -> None:
+        """Update the last synced version for a file.
+
+        Args:
+            local_path: Path to the local file.
+            version: New version number.
+        """
+        abs_path = os.path.abspath(local_path)
+        with self._lock:
+            if abs_path in self._links:
+                self._links[abs_path].last_synced_version = version
+            if abs_path in self.file_map:
+                self.file_map[abs_path]["last_synced_version"] = version
+        self._save_map()
+
+    def unlink_file(self, local_path: str) -> bool:
+        """Remove a sync link.
+
+        Args:
+            local_path: Path to the local file.
+
+        Returns:
+            True if link was removed, False if not found.
+        """
+        abs_path = os.path.abspath(local_path)
+        with self._lock:
+            if abs_path in self._links:
+                del self._links[abs_path]
+                if abs_path in self.file_map:
+                    del self.file_map[abs_path]
+                self._save_map()
+                return True
+            return False
+
+
+# ============================================================================
+# Global manager instances
+# ============================================================================
+
+search_manager = SearchManager()
+sync_manager = SyncManager()

@@ -1,0 +1,392 @@
+"""Integration tests for authentication flow.
+
+These tests verify the complete auth flow works correctly,
+including credential persistence across "restarts".
+"""
+
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
+from google.oauth2.credentials import Credentials
+
+from auth.credential_store import LocalDirectoryCredentialStore
+from auth.google_auth import get_credentials
+from auth.oauth21_session_store import OAuth21SessionStore
+from auth.oauth_clients import OAuthClientSelection
+
+
+class TestCredentialPersistence:
+    """Test that credentials persist correctly across store instances."""
+
+    @pytest.fixture
+    def temp_creds_dir(self, tmp_path):
+        """Create a temporary credentials directory."""
+        creds_dir = tmp_path / "credentials"
+        creds_dir.mkdir()
+        return str(creds_dir)
+
+    @pytest.fixture
+    def sample_credentials(self):
+        """Create sample credential data."""
+        return Credentials(
+            token="ya29.test_access_token",
+            refresh_token="1//test_refresh_token",
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id="test_client_id.apps.googleusercontent.com",
+            client_secret="test_client_secret",
+            scopes=[
+                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/gmail.readonly",
+            ],
+            expiry=datetime.utcnow() + timedelta(hours=1),
+        )
+
+    def test_credentials_survive_store_recreation(self, temp_creds_dir, sample_credentials):
+        """Credentials should be retrievable after creating a new store instance."""
+        user_email = "test@example.com"
+
+        store1 = LocalDirectoryCredentialStore(temp_creds_dir)
+        store1.store_credential(user_email, sample_credentials)
+
+        store2 = LocalDirectoryCredentialStore(temp_creds_dir)
+
+        retrieved = store2.get_credential(user_email)
+        assert retrieved is not None
+        assert retrieved.token == sample_credentials.token
+        assert retrieved.refresh_token == sample_credentials.refresh_token
+
+    def test_session_mapping_survives_restart(self, tmp_path, monkeypatch):
+        """Verify that session mappings persist across store recreation (server restart)."""
+        monkeypatch.setenv("GOOGLE_MCP_CREDENTIALS_DIR", str(tmp_path))
+
+        user_email = "test@example.com"
+        session_id = "mcp_session_123"
+
+        store1 = OAuth21SessionStore()
+        store1.store_session(
+            user_email=user_email,
+            access_token="test_token",
+            token_uri="https://oauth2.googleapis.com/token",
+            mcp_session_id=session_id,
+        )
+
+        assert store1.get_user_by_mcp_session(session_id) == user_email
+
+        store2 = OAuth21SessionStore()
+
+        assert store2.get_user_by_mcp_session(session_id) == user_email
+
+
+class TestSessionRecovery:
+    """Test session recovery scenarios."""
+
+    @pytest.fixture
+    def temp_creds_dir(self, tmp_path, monkeypatch):
+        """Create and configure temporary credentials directory."""
+        creds_dir = tmp_path / "credentials"
+        creds_dir.mkdir()
+        monkeypatch.setenv("GOOGLE_MCP_CREDENTIALS_DIR", str(creds_dir))
+        return str(creds_dir)
+
+    def test_single_user_mode_finds_credentials(self, temp_creds_dir):
+        """In single-user mode, credentials can be found for the only user."""
+        user_email = "user@example.com"
+        credentials = Credentials(
+            token="test_token",
+            refresh_token="test_refresh",
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id="test_id",
+            client_secret="test_secret",
+            scopes=["https://www.googleapis.com/auth/drive.readonly"],
+            expiry=datetime.utcnow() + timedelta(hours=1),
+        )
+
+        store = LocalDirectoryCredentialStore(temp_creds_dir)
+        store.store_credential(user_email, credentials)
+
+        users = store.list_users()
+        assert len(users) == 1
+        assert users[0] == user_email
+
+        retrieved = store.get_credential(user_email)
+        assert retrieved is not None
+        assert retrieved.token == "test_token"
+
+
+class TestTokenRefresh:
+    """Test token refresh scenarios."""
+
+    @pytest.fixture
+    def temp_creds_dir(self, tmp_path, monkeypatch):
+        """Create and configure temporary credentials directory."""
+        creds_dir = tmp_path / "credentials"
+        creds_dir.mkdir()
+        monkeypatch.setenv("GOOGLE_MCP_CREDENTIALS_DIR", str(creds_dir))
+        return str(creds_dir)
+
+    def test_updated_credentials_persist(self, temp_creds_dir):
+        """When credentials are updated, the new values persist."""
+        user_email = "test@example.com"
+        store = LocalDirectoryCredentialStore(temp_creds_dir)
+
+        original_creds = Credentials(
+            token="original_token",
+            refresh_token="original_refresh",
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id="test_id",
+            client_secret="test_secret",
+            scopes=["https://www.googleapis.com/auth/drive"],
+            expiry=datetime.utcnow() + timedelta(hours=1),
+        )
+        store.store_credential(user_email, original_creds)
+
+        refreshed_creds = Credentials(
+            token="refreshed_token",
+            refresh_token="original_refresh",
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id="test_id",
+            client_secret="test_secret",
+            scopes=["https://www.googleapis.com/auth/drive"],
+            expiry=datetime.utcnow() + timedelta(hours=1),
+        )
+        store.store_credential(user_email, refreshed_creds)
+
+        new_store = LocalDirectoryCredentialStore(temp_creds_dir)
+        retrieved = new_store.get_credential(user_email)
+
+        assert retrieved is not None
+        assert retrieved.token == "refreshed_token"
+        assert retrieved.refresh_token == "original_refresh"
+
+    def test_get_credentials_refreshes_expired_file_credentials_before_reauth(self, temp_creds_dir, monkeypatch):
+        """Expired file credentials should refresh before forcing re-auth."""
+        user_email = "refresh@example.com"
+        store = LocalDirectoryCredentialStore(temp_creds_dir)
+
+        expired_creds = Credentials(
+            token="expired_token",
+            refresh_token="refresh_token",
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id="test_id",
+            client_secret="test_secret",
+            scopes=["https://www.googleapis.com/auth/drive"],
+            expiry=datetime.utcnow() - timedelta(hours=1),
+        )
+        store.store_credential(user_email, expired_creds)
+
+        refreshed_session: dict[str, str | None] = {}
+
+        class _SessionStore:
+            def get_credentials_by_mcp_session(self, _session_id):
+                return None
+
+            def store_session(self, **kwargs):
+                refreshed_session.update(kwargs)
+
+        def _fake_refresh(self, _request):
+            self.token = "refreshed_token"
+            self.expiry = datetime.utcnow() + timedelta(hours=1)
+
+        monkeypatch.setattr(Credentials, "refresh", _fake_refresh, raising=False)
+        monkeypatch.setattr("auth.google_auth.get_credential_store", lambda: store)
+        monkeypatch.setattr("auth.google_auth.get_oauth21_session_store", lambda: _SessionStore())
+        monkeypatch.setattr(
+            "auth.google_auth.resolve_oauth_client_for_user",
+            lambda _user_google_email, override_client_key=None: OAuthClientSelection(
+                client_key="test-client",
+                client_id="test_id",
+                client_secret="test_secret",
+                source="test",
+                selection_mode="mapped_only",
+            ),
+        )
+
+        resolved = get_credentials(
+            user_google_email=user_email,
+            required_scopes=["https://www.googleapis.com/auth/drive"],
+            session_id="mcp-session-refresh",
+        )
+
+        assert resolved is not None
+        assert resolved.token == "refreshed_token"
+        assert refreshed_session["user_email"] == user_email
+        assert refreshed_session["access_token"] == "refreshed_token"
+
+
+class TestMultiUserIsolation:
+    """Test that multiple users are properly isolated."""
+
+    @pytest.fixture
+    def temp_creds_dir(self, tmp_path, monkeypatch):
+        """Create and configure temporary credentials directory."""
+        creds_dir = tmp_path / "credentials"
+        creds_dir.mkdir()
+        monkeypatch.setenv("GOOGLE_MCP_CREDENTIALS_DIR", str(creds_dir))
+        return str(creds_dir)
+
+    def test_users_have_separate_credentials(self, temp_creds_dir):
+        """Each user has their own credentials."""
+        store = LocalDirectoryCredentialStore(temp_creds_dir)
+
+        alice_creds = Credentials(
+            token="alice_token",
+            refresh_token="alice_refresh",
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id="test_id",
+            client_secret="test_secret",
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        bob_creds = Credentials(
+            token="bob_token",
+            refresh_token="bob_refresh",
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id="test_id",
+            client_secret="test_secret",
+            scopes=["https://www.googleapis.com/auth/gmail"],
+        )
+
+        store.store_credential("alice@example.com", alice_creds)
+        store.store_credential("bob@example.com", bob_creds)
+
+        alice_retrieved = store.get_credential("alice@example.com")
+        bob_retrieved = store.get_credential("bob@example.com")
+
+        assert alice_retrieved.token == "alice_token"
+        assert bob_retrieved.token == "bob_token"
+        assert alice_retrieved.scopes != bob_retrieved.scopes
+
+    def test_session_binding_prevents_cross_access(self, tmp_path, monkeypatch):
+        """Session bound to one user cannot access another user's credentials."""
+        monkeypatch.setenv("GOOGLE_MCP_CREDENTIALS_DIR", str(tmp_path))
+
+        store = OAuth21SessionStore()
+
+        store.store_session(
+            user_email="alice@example.com",
+            access_token="alice_token",
+            token_uri="https://oauth2.googleapis.com/token",
+            mcp_session_id="alice_session",
+        )
+        store.store_session(
+            user_email="bob@example.com",
+            access_token="bob_token",
+            token_uri="https://oauth2.googleapis.com/token",
+            mcp_session_id="bob_session",
+        )
+
+        alice_creds = store.get_credentials_with_validation(
+            requested_user_email="alice@example.com",
+            session_id="alice_session",
+        )
+        assert alice_creds is not None
+        assert alice_creds.token == "alice_token"
+
+        cross_access = store.get_credentials_with_validation(
+            requested_user_email="bob@example.com",
+            session_id="alice_session",
+        )
+        assert cross_access is None
+
+
+class TestOAuthStatePersistence:
+    """Test OAuth state persistence across restarts."""
+
+    @pytest.fixture
+    def temp_dir(self, tmp_path, monkeypatch):
+        """Create and configure temporary directory."""
+        monkeypatch.setenv("GOOGLE_MCP_CREDENTIALS_DIR", str(tmp_path))
+        return str(tmp_path)
+
+    def test_oauth_state_survives_restart(self, temp_dir):
+        """OAuth state persists across store recreation."""
+        state = "test_oauth_state_12345"
+        session_id = "mcp_session_123"
+
+        store1 = OAuth21SessionStore()
+        store1.store_oauth_state(state, session_id=session_id)
+
+        store2 = OAuth21SessionStore()
+
+        result = store2.validate_and_consume_oauth_state(state, session_id=session_id)
+        assert result["session_id"] == session_id
+
+
+class TestSessionRemovalPersistence:
+    """Test that session removal is persisted to disk."""
+
+    @pytest.fixture
+    def temp_dir(self, tmp_path, monkeypatch):
+        """Create and configure temporary directory."""
+        monkeypatch.setenv("GOOGLE_MCP_CREDENTIALS_DIR", str(tmp_path))
+        return str(tmp_path)
+
+    def test_removed_session_does_not_survive_restart(self, temp_dir):
+        """Verify that removed sessions don't reappear after restart."""
+        user_email = "removed@example.com"
+        session_id = "mcp_session_to_remove"
+
+        # Create and store a session
+        store1 = OAuth21SessionStore()
+        store1.store_session(
+            user_email=user_email,
+            access_token="test_token",
+            token_uri="https://oauth2.googleapis.com/token",
+            mcp_session_id=session_id,
+        )
+
+        # Verify it exists
+        assert store1.get_user_by_mcp_session(session_id) == user_email
+
+        # Remove the session
+        store1.remove_session(user_email)
+
+        # Verify it's gone from the current store
+        assert store1.get_user_by_mcp_session(session_id) is None
+
+        # Create a new store (simulating server restart)
+        store2 = OAuth21SessionStore()
+
+        # Verify the removed session does NOT reappear
+        assert store2.get_user_by_mcp_session(session_id) is None
+
+    def test_partial_removal_preserves_other_sessions(self, temp_dir):
+        """Removing one session should not affect other sessions."""
+        user1 = "user1@example.com"
+        user2 = "user2@example.com"
+        session1 = "session_1"
+        session2 = "session_2"
+
+        store1 = OAuth21SessionStore()
+        store1.store_session(
+            user_email=user1,
+            access_token="token1",
+            token_uri="https://oauth2.googleapis.com/token",
+            mcp_session_id=session1,
+        )
+        store1.store_session(
+            user_email=user2,
+            access_token="token2",
+            token_uri="https://oauth2.googleapis.com/token",
+            mcp_session_id=session2,
+        )
+
+        # Remove only user1
+        store1.remove_session(user1)
+
+        # Restart
+        store2 = OAuth21SessionStore()
+
+        # user1 should be gone, user2 should remain
+        assert store2.get_user_by_mcp_session(session1) is None
+        assert store2.get_user_by_mcp_session(session2) == user2
+
+
+def test_default_store_respects_workspace_mcp_config_dir(tmp_path, monkeypatch):
+    """Default credential store path should resolve from WORKSPACE_MCP_CONFIG_DIR."""
+    monkeypatch.delenv("GOOGLE_MCP_CREDENTIALS_DIR", raising=False)
+    monkeypatch.setenv("WORKSPACE_MCP_CONFIG_DIR", str(tmp_path))
+
+    store = LocalDirectoryCredentialStore()
+
+    assert Path(store.base_dir) == tmp_path / "credentials"

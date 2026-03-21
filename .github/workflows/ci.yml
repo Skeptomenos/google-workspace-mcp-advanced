@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  startup-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv pip install -e ".[dev]" --system
+
+      - name: Smoke test imports
+        run: |
+          uv run python -c "import main"
+          uv run python -c "import fastmcp_server"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv pip install -e ".[dev]" --system
+
+      - name: Run ruff linter
+        run: uv run ruff check .
+
+      - name: Check tool decorator order
+        run: uv run python scripts/check_tool_decorators.py
+
+      - name: Check dry-run default safety
+        run: uv run python scripts/check_dry_run_defaults.py
+
+      - name: Check distribution scope references
+        run: uv run python scripts/check_distribution_scope.py
+
+      - name: Check docs separation
+        run: uv run python scripts/check_docs_separation.py
+
+      - name: Check release version coupling
+        run: uv run python scripts/check_release_version_match.py
+
+      - name: Run ruff formatter check
+        run: uv run ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    env:
+      UV_PYTHON_DOWNLOADS: "never"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv pip install -e ".[dev]" --system
+
+      - name: Run tests
+        run: uv run --python ${{ matrix.python-version }} pytest tests/ -v --tb=short
+
+      - name: Run tests with coverage
+        run: uv run --python ${{ matrix.python-version }} pytest tests/ --cov=. --cov-report=xml
+        if: matrix.python-version == '3.11'
+
+      - name: Distribution smoke tests
+        if: matrix.python-version == '3.11'
+        run: uv run --python ${{ matrix.python-version }} pytest -q tests/unit/core/test_distribution_checks.py
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: matrix.python-version == '3.11'
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv pip install -e ".[dev]" --system
+
+      - name: Run type checker
+        run: uv run pyright --project pyrightconfig.json
